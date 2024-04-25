@@ -1,0 +1,11 @@
+Variable,Value
+Thermocline depth [m],7
+Start of the stratification period [dd.mm],01.03
+End of the stratification period [dd.mm],01.12
+Start of the anoxic period [dd.mm],01.07
+Temperature epilimnion [°C],20
+Temperature hypolimnion [°C],10
+TP concentration at the sediment surface [mg-P/g-dry-sed],-
+Vertical diffusivity [m2.s-1],1e-7
+Maximal net sedimation rate sigma [yr-1],- 
+Maximal net sedimentation flux NS [tons-P/yr],-
