@@ -1,928 +1,671 @@
+"""
+Functions used to make the phosphorus budget of a lake.
+
+Author: T. Doda, Surface Waters - Research and Management, Eawag
+Contact: tomy.doda@gmail.com
+Date: 17.04.2024
+"""
+
 import os
-import json
 import math
 import numpy as np
 import pandas as pd
-import gsw
-import seawater as sw
-from shutil import copyfile
-from envass import qualityassurance
-from datetime import datetime, timedelta
-import time
-from scipy.ndimage import uniform_filter1d
+from datetime import datetime, timedelta, timezone
+from scipy.stats import linregress
 
 
-def copyFiles(outfolder, infolder):
-    filelist = []
-    for path, subdirs, files in os.walk(infolder):
-        for name in files:
-            filelist.append(os.path.join(path, name))
+#%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+def compute_river_load_from_obs(tnum,Qval,TPval,tbudget):
+    """Function compute_river_load_from_obs
 
-    copied = []
-    for file in filelist:
-        if ".TOB" in file and not os.path.isfile(os.path.join(outfolder, os.path.basename(file))):
-            path_arr = os.path.basename(file).split(".")
-            new_file = "{}__{}.{}".format(os.path.basename(os.path.dirname(file)), path_arr[0], path_arr[1])
-            copyfile(file, os.path.join(outfolder, new_file))
-            copied.append(file)
-    return copied
+    Calculates the input (or output) of phosphorus from measurements of discharge and TP in rivers and point sources.
 
-
-def is_number(n):
-    try:
-        float(n)
-    except ValueError:
-        return False
-    else:
-        return True
-
-
-def check_valid_profile(data, value):
-    if float(np.nanmax(data)) > float(value):
-        return True
-    else:
-        return False
-
-
-def strip_metadata(metadata):
-    return metadata.replace(" ", "").split(":")[1]
-
-
-def fixed_grid_resample_guide(data, grid):
-    resample = []
-    for g in grid:
-        for j in range(len(data)):
-            if data[j] > g or j >= len(data) - 1:
-                resample.append({"index": False})
-                break
-            elif data[j] <= g < data[j + 1]:
-                itp = (g - data[j]) / (data[j + 1] - data[j])
-                resample.append({"index": j, "interpolation": itp})
-                break
-    return resample
-
-
-def resample(guide, data):
-    out = []
-    for i in range(len(guide) - 1):
-        if not guide[i]["index"]:
-            out.append(np.nan)
-        else:
-            value = ((data[guide[i]["index"] + 1] - data[guide[i]["index"]]) * guide[i]["interpolation"]) + data[guide[i]["index"]]
-            out.append(value)
-    out.append(np.nan)
-    return out
-
-
-def index_of_max(arr):
-    return np.argmax(np.array(arr))
-
-
-def position_in_array(arr, value):
-    for i in range(len(arr)):
-        if value < arr[i]:
-            return i
-    return len(arr)
-
-
-def round_to_days(dt, n):
-    day = math.floor(dt.day / n)*n
-    if day < 10:
-        return "0" + str(day)
-    else:
-        return str(day)
-
-
-def advanced_quality_flags(df, json_path="quality_assurance.json"):
-    """
-        input :
-            - df is a dataframe of level 1B where basic check have been performed
-            - json path: path for the advanced quality check json file, produced by the jupyter notebook
-        output:
-            - dictionnary where the dataframe is stored with updated advanced quality checks
-        """
-    quality_assurance_dict = json.load(open(json_path))
-    var_name = quality_assurance_dict.keys()
-    advanced_df = df.copy()
-    for var in var_name:
-        if quality_assurance_dict[var]:
-            if var in advanced_df.keys(): 
-                qa = qualityassurance(np.array(df[var]), np.array(df["time"]), **quality_assurance_dict[var]["advanced"])
-                advanced_df[var + "_qual"].values[np.array(qa, dtype=bool)] = 1
-    return advanced_df
-
-
-def json_converter(qa):
-    for keys in qa.keys():
-        try:
-            if qa[keys]["simple"]["bounds"][0] == "-inf":
-                qa[keys]["simple"]["bounds"][0] = -np.inf
-            if qa[keys]["simple"]["bounds"][1] == "inf":
-                qa[keys]["simple"]["bounds"][1] = np.inf
-        except:pass
-    try:
-        if qa["time"]["simple"]["bounds"][1] == "now":
-            qa["time"]["simple"]["bounds"][1] = datetime.now().timestamp()
-        return qa
-    except:
-        return qa
-    
-    
-def log(str, indent=0, start=False,printlog=True):
-    if printlog:
-        if start:
-            out = "\n" + str + "\n"
-            with open("log.txt", "w") as file:
-                file.write(out + "\n")
-        else:
-            out = datetime.now().strftime("%H:%M:%S.%f") + (" " * 3 * (indent + 1)) + str
-            with open("log.txt", "a") as file:
-                file.write(out + "\n")
-        print(out)
-
-
-def error(str):
-    out = datetime.now().strftime("%H:%M:%S.%f") + "   ERROR: " + str
-    with open("log.txt", "a") as file:
-        file.write(out + "\n")
-    raise ValueError(str)
-
-
-def find_closest_index(arr, value):
-    return min(range(len(arr)), key=lambda i: abs(arr[i] - value))
-
-
-def is_number(n):
-    try:
-        float(n)
-    except ValueError:
-        return False
-    else:
-        return True
-
-
-def isnt_number(n):
-    try:
-        float(n)
-    except ValueError:
-        return True
-    else:
-        return False
-
-def first_centered_differences(x, y, fill=False): 
-    if x.size != y.size:
-        log("first-centered differences: vectors do not have the same size")
-    dy = np.full(x.size, np.nan)
-    iif = np.where((np.isfinite(x)) & (np.isfinite(y)))[0]
-    if iif.size == 0:
-        return dy
-    x0 = x[iif]
-    y0 = y[iif]
-    dy0 = np.full(x0.size, np.nan)
-    dy0[0] = (y0[1] - y0[0]) / (x0[1] - x0[0])
-    dy0[-1] = (y0[-1] - y0[-2]) / (x0[-1] - x0[-2])
-    dy0[1:-1] = (y0[2:] - y0[0:-2]) / (x0[2:] - x0[0:-2])
-
-    dy[iif] = dy0
-
-    if fill:
-        dy[0:iif[0]] = dy[iif[0]]
-        dy[iif[-1] + 1:] = dy[iif[-1]]
-    return dy
-
-
-def default_salinity_temperature(temperature):
-    return 1.8626 - 0.052908 * temperature + 0.00093057 * temperature ** 2 - 6.78e-6 * temperature ** 3
-
-def fcond20_temperature_Kivu(temperature):
-    # Compute f(T)=cond_20/cond(T)
-    # Based on measurements in Lake Kivu by N. Gruber and A. Wüest in 2002
-    return (-6E-06*temperature**3+0.0008*temperature**2-0.0465*temperature+1.6636)
-
-def salinity(Temp, Cond, y_cond, temperature_func= default_salinity_temperature):
-    ft = temperature_func(Temp)
-    cond20 = ft * Cond * 1000 # uS/cm
-    salin = y_cond * cond20 # g/kg
-    return salin
-
-def salinity_Kivu(Temp, Cond,temperature_func=fcond20_temperature_Kivu):
-    # Compute salinity from conductivity
-    # Based on measurements in Lake Kivu by N. Gruber and A. Wüest in 2002
-    ft = temperature_func(Temp)
-    cond20 = ft * Cond * 1000 # uS/cm
-    salin=3E-08*cond20**2 + 0.001*cond20 - 0.0351 # g/kg
-    return salin, cond20/1000
-
-def density(temperature, salinity,press=0,C_CH4=0,C_CO2=0,beta_CH4=-1.25E-3,beta_CO2=0.25E-3):
-    # C_CH4 and C_CO2 must be provided in g/L
-    # Density from Chen & Millero (1986):
-    rho = 1e3 * (
-                0.9998395 + 6.7914e-5 * temperature - 9.0894e-6 * temperature ** 2 + 1.0171e-7 * temperature ** 3 -
-                1.2846e-9 * temperature ** 4 + 1.1592e-11 * temperature ** 5 - 5.0125e-14 * temperature ** 6 + (
-                    8.181e-4 - 3.85e-6 * temperature + 4.96e-8 * temperature ** 2) * salinity)
-    # Approach: use the previous estimate of rho to calculate the next one (another option would be to use the same reference density for all estimates)
-    if isinstance(C_CH4,np.ndarray) or (not C_CH4==0):
-        rho=rho*(1+beta_CH4*C_CH4)
-        
-    if isinstance(C_CO2,np.ndarray) or (not C_CO2==0):
-        rho=rho*(1+beta_CO2*C_CO2) 
-        
-    if isinstance(press,np.ndarray) or (not press==0) and (len(press)==len(temperature)):
-        K=19652.17+148.113*temperature-2.293*temperature**2 + 1.256*1e-2*temperature**3\
- -4.18*1e-5*temperature**4+(3.2726-2.147*1e-4*temperature+1.128*1e-4*temperature**2)*press/10+(53.238-0.313*temperature+5.728*1e-3*press/10)*salinity
-        rho=rho/(1-0.1*press/K)
-        
-        
-    return rho
-
-
-def density_Kivu(temperature, salinity,press=0,C_CH4=0,C_CO2=0,beta_S=0.75E-3,beta_CH4=-1.25E-3,beta_CO2=0.284E-3):
-    # C_CH4 and C_CO2 must be provided in g/L
-    # beta coefficients from Schmid et al., 2004
-    rho_T = 1e3 * (
-                0.9998395 + 6.7914e-5 * temperature - 9.0894e-6 * temperature ** 2 + 1.0171e-7 * temperature ** 3 -
-                1.2846e-9 * temperature ** 4 + 1.1592e-11 * temperature ** 5 - 5.0125e-14 * temperature ** 6)
-    
-    contrib_S=beta_S*salinity
-    # Approach: use the previous estimate of rho to calculate the next one (another option would be to use the same reference density for all estimates)
-    if isinstance(C_CH4,np.ndarray) or (not C_CH4==0):
-        contrib_CH4=beta_CH4*C_CH4
-    else:
-        contrib_CH4=0
-        
-    if isinstance(C_CO2,np.ndarray) or (not C_CO2==0):
-        contrib_CO2=beta_CO2*C_CO2
-    else:
-        contrib_CO2=0
-        
-    rho=rho_T*(1+contrib_S+contrib_CH4+contrib_CO2)
-        
-    if isinstance(press,np.ndarray) or (not press==0) and (len(press)==len(temperature)):
-        K=19652.17+148.113*temperature-2.293*temperature**2 + 1.256*1e-2*temperature**3\
- -4.18*1e-5*temperature**4+(3.2726-2.147*1e-4*temperature+1.128*1e-4*temperature**2)*press/10+(53.238-0.313*temperature+5.728*1e-3*press/10)*salinity
-        rho=rho/(1-0.1*press/K)
-        
-        
-    return rho
-
-
-
-def Gamma_adiabatic(T, S, p, lat=46.):
-    alpha = sw.alpha(S, T, p)
-    cp = sw.cp(S, T, p)
-    Gamma = sw.g(lat) * alpha * (T - 273.15) / cp
-    return Gamma
-
-def mask_single_data(data, mask):
-    try:
-        idx = mask > 0
-        data = data.astype(float)
-        data[idx] = np.nan
-        return data
-    except:
-        print("Masking failed")
-        return data
-
-
-def potential_temperature(T, S, p, z, lat=46.2):
-    iif = np.where(np.isfinite(T) & np.isfinite(S) & np.isfinite(p) & np.isfinite(z))
-    PT = np.full(T.size, np.nan)
-    T = T[iif]
-    p = p[iif]
-    z = z[iif]
-    S = S[iif]
-    pt0 = np.copy(T)
-    n = pt0.size
-    pt1 = np.full(n, np.nan)
-    iterate = True
-    j = 0
-    while iterate:
-        intGamma = np.zeros(n)
-        for i in range(1, n):
-            Gamma0 = Gamma_adiabatic(pt0, S[i], p, lat)
-            intGamma[i] = np.trapz(Gamma0[0:i + 1], x=z[0:i + 1])
-        pt1 = T + intGamma
-        j += 1
-        if j > 100 or np.nanmax(np.abs(pt1 - pt0)) < 1e-3:
-            iterate = False
-        else:
-            pt0 = np.copy(pt1)
-
-    PT[iif] = pt1
-    return PT
-
-
-def potential_temperature_gsw(T, S, p):
-    return gsw.pt_from_t(S, T, p, 0)
-
-
-def potential_temperature_sw(T, S, p, p_ref):
-    """
-    Calculates potential temperature as per UNESCO 1983 report.
-    Parameters
-    ----------
-    s(p) : array_like
-        salinity [psu (PSS-78)]
-    t(p) : array_like
-        temperature [℃ (ITS-90)]
-    p : array_like
-        pressure [db].
-    pr : array_like
-        reference pressure [db], default = 0
-    Returns
-    -------
-    pt : array_like
-        potential temperature relative to PR [℃ (ITS-90)]
-    """
-    return sw.ptmp(s=S,t=T,p=p,pr=p_ref)
-
-
-def oxygen_saturation(T, S, altitude=372., lat=46.2, units="mgl"):
-    # calculates oxygen saturation in mg/l according to Garcia-Benson
-    # to be coherent with Hannah
-    if units != "mgl" and units != "mll":
-        units = "mgl"
-    mgL_mlL = 1.42905
-    mmHg_mb = 0.750061683
-    mmHg_inHg = 25.3970886
-    standard_pressure_sea_level = 29.92126
-    standard_temperature_sea_level = 15 + 273.15
-    gravitational_acceleration = gr = sw.g(lat)
-    air_molar_mass = 0.0289644
-    universal_gas_constant = 8.31447
-    baro = (1. / mmHg_mb) * mmHg_inHg * standard_pressure_sea_level * np.exp(
-        (-gravitational_acceleration * air_molar_mass * altitude) / (
-                    universal_gas_constant * standard_temperature_sea_level))
-    u = 10 ** (8.10765 - 1750.286 / (235 + T))
-    press_corr = (baro * mmHg_mb - u) / (760 - u)
-
-    Ts = np.log((298.15 - T) / (273.15 + T))
-    lnC = 2.00907 + 3.22014 * Ts + 4.0501 * Ts ** 2 + 4.94457 * Ts ** 3 + -0.256847 * Ts ** 4 + 3.88767 * Ts ** 5 - S * (
-                0.00624523 + 0.00737614 * Ts + 0.010341 * Ts ** 2 + 0.00817083 * Ts ** 3) - 4.88682e-07 * S ** 2
-    O2sat = np.exp(lnC)
-    if units == "mll":
-        O2sat = O2sat * press_corr
-    elif units == "mgl":
-        O2sat = O2sat * mgL_mlL * press_corr
-
-    return O2sat
-
-
-def parse_file(input_file_path, string):
-    # Define the parameters used to read the files based on the data after the selected string
-    valid = True
-    start_date=''
-    with open(input_file_path, encoding="utf8", errors='ignore') as f:
-        lines = f.readlines()
-    for i in range(len(lines)):
-        if 'start_time' in lines[i]:
-            start_date_str=lines[i][lines[i].find("start_time")+13:lines[i].find("[Instrument")-1]
-            start_date=datetime.strptime(start_date_str,'%b %d %Y %H:%M:%S')
-        if string in lines[i]:
-            break
-            print("yes")
-    if input_file_path[-4:]=='.TOB':
-        date_format = "%m/%d/%Y %H:%M:%S"
-        columns = lines[i + 2].replace(";", "").split() 
-        columns.pop(0)
-        columns = rename_duplicates(columns)
-        units = lines[i + 3].replace(";", "").replace("[", "").replace("]", "").split()
-        skip_rows = i + 5
-        n = 0
-        while len(lines[i + 5].split()) - 1 > len(columns):
-            columns.append(n)
-            n = n + 1
-        if len(lines) <= skip_rows + 1 or len(columns) < 5:
-            valid=False
-    elif input_file_path[-4:]=='.cnv':
-        skip_rows=i+1
-        # Should match the variable names and units of CTD class to save the variables
-        columns=['Minutes','Depth','Temp','pH','Fluo','Cond','Flag'] 
-        units=['min','m','degC','_','mg/m^3','uS/cm','_']
-        valid=True
-        date_format='%b %d %Y %H:%M:%S'
-    return skip_rows, columns, units, valid, date_format, start_date, 
-
-        
-def rename_duplicates(arr):
-    out = []
-    d = {}
-
-    for i in arr:
-        d.setdefault(i, -1)
-        d[i] += 1
-
-        if d[i] >= 1:
-            out.append('%s%d' % (i, d[i]))
-        else:
-            out.append(i)
-    return out
-
-
-
-def check_variable(variable, unit, columns, units):
-    if variable in columns:
-        for i in range(len(columns)):
-            if variable == columns[i]:
-                break
-        if units[i] in unit: 
-            return True
-        else:
-            log("{} needs unit [{}] but has unit [{}]".format(variable, unit, units[i]))
-            return False
-    else:
-        return False
-
-    
-def parse_time(df, variable, name, columns, units, ref_date,day_month=True): 
-    """
-    Function description
-    Structure:  
-        - First level of if-else-statements checks if  AM or PM exists. 
-        - Second level of if-else-statements checks what the column names for the date and time are.
-        - The third level of if-else-statements is only triggered, if AM or PM exists and localizes in which column AM/PM 
-        is located. The statement then adjusts the column headers of the dataframe by giving the column with AM/ PM the header "0
     Inputs:
-        - day_month: if True, day is before month (only applied for format xx/xx/xxxx without AM/PM)         
-    Output:
-        New dataframe column with parsed time in it.
-        Dataframe with adjusted column headers.
-    """  
-    AM_PM=["AM", "AM?", "AM.?", "PM", "PM?", "PM.?"]
-    res = [ele for ele in AM_PM if(ele in df.values[0])] # Check if AM or PM or similar is present in the first row of the dataframe
-   
-    if "IntD" in columns and "IntT" in columns:     
-        df=df.rename(columns = {'IntD':'Date', 'IntT':'Time'})
-        columns[columns.index('IntD')]='Date'
-        columns[columns.index('IntT')]='Time'
-    elif "IntDT" in columns and "IntDT1" in columns:
-        df=df.rename(columns = {'IntDT':'Date', 'IntDT1':'Time'})
-        columns[columns.index('IntDT')]='Date'
-        columns[columns.index('IntDT1')]='Time'
-    elif "IntT" in columns and "IntT1" in columns:
-        df=df.rename(columns = {'IntT':'Date', 'IntT1':'Time'})
-        columns[columns.index('IntT')]='Date'
-        columns[columns.index('IntT1')]='Time'
-    elif "IntD" in columns and "IntD1" in columns:
-        df=df.rename(columns = {'IntD':'Date', 'IntD1':'Time'})
-        columns[columns.index('IntD')]='Date'
-        columns[columns.index('IntD1')]='Time'
-    else:
-        raise ValueError("Cannot process unrecognised file.")
-        
-    if ":" in df["Date"][df.index[0]]: #Flip date and time
-        hourdata=df["Date"]
-        df["Date"]=df["Time"]
-        df["Time"]=hourdata
-
-    if bool(res)==True:
-        dateformat="%m/%d/%Y %H:%M:%S"
-            
-        if bool([ele for ele in AM_PM if(ele in list(df["Time"]))])==True:
-            df=df.rename(columns = {'Date':'Time', 'Time':'Date'}) # reverse time and date
-            ind_date=columns.index('Date')
-            ind_time=columns.index('Time')
-            columns[ind_date]='Time'
-            columns[ind_time]='Date'
-        
-        elif bool([ele for ele in AM_PM if(ele in list(df["Date"]))])==True: 
-            # Invert column names
-            columns[columns.index('Date')]='AMPM'
-            columns[columns.index(0)]='Date'
-            # del columns[-1]
-            # columns.insert(columns.index("Date"), 0) 
-            df.columns = columns
-            if "?" in str([ele for ele in AM_PM if(ele in list(df["Date"]))]):
-                df=df.replace({0:{'\?':'','\.':''}},regex=True) # Remove ? and .
-            try:
-                datetime_arr = pd.to_datetime(df["Date"] + " " + df["Time"], format=dateformat, dayfirst=True)
-                arr = list(datetime_arr.values.astype(float) / 10 ** 9)
-                # if ref_date and abs(arr[0] - ref_date) > 30*24*60*60:
-                #     arr = list(
-                #         datetime_arr.values.astype(float) / 10 ** 9)
-                # df["time"] = arr
-                # return df
-            except Exception:
-                log("Datetime file parse failed")
-                raise
-        
-        elif bool([ele for ele in AM_PM if(ele in list(df[0]))])==True:
-            if "?" in str([ele for ele in AM_PM if(ele in list(df[0]))]):
-                df=df.replace({0:{'\?':'','\.':''}},regex=True) # Remove ? and .
-            
-            if ("-" in df["Date"][df.index[0]]):
-                try:
-                    datetime_arr = pd.to_datetime(df["Date"]+" "+df["Time"]+" "+df[0],format="%d-%b-%y %I:%M:%S %p") 
-                except Exception:
-                    try:
-                        datetime_arr = pd.to_datetime(df["Date"]+" "+df["Time"]+" "+df[0],format="%d-%b-%y %I:%M:%S") 
-                    except Exception:
-                        raise Exception("Datetime file parse failed")    
-            else:
-                try:
-                    datetime_arr = pd.to_datetime(df["Date"]+" "+df["Time"]+" "+df[0],format="%m/%d/%Y %I:%M:%S %p") 
-                except Exception:
-                    try:
-                        datetime_arr = pd.to_datetime(df["Date"]+" "+df["Time"]+" "+df[0],format="%m/%d/%Y %I:%M:%S") 
-                    except Exception:
-                        raise Exception("Datetime file parse failed")  
-            arr = list(datetime_arr.values.astype(float) / 10 ** 9)
-            # df["time"] = arr
-            # return df 
-            # try:
-            #     datetime_arr = pd.to_datetime(df["Date"]+" "+df["Time"]+" "+df[0],format="%m/%d/%Y %I:%M:%S %p")
-            #     arr = list(datetime_arr.values.astype(float) / 10 ** 9)
-            #     # if ref_date and abs(arr[0] - ref_date) > 30*24*60*60:
-            #     #     arr = list(
-            #     #         datetime_arr.values.astype(float) / 10 ** 9)
-            #     df["time"] = arr
-            #     return df
-            # except Exception:
-            #     datetime_arr = pd.to_datetime(df["Date"]+" "+df["Time"]+" "+df[0],format="%d-%b-%y %I:%M:%S %p")
-            #     arr = list(datetime_arr.values.astype(float) / 10 ** 9)
-            #     # if ref_date and abs(arr[0] - ref_date) > 30 * 24 * 60 * 60:
-            #     #     arr = list(
-            #     #         datetime_arr.values.astype(float) / 10 ** 9)
-            #     df["time"] = arr
-            #     return df
-        else:
-            del columns[-1]
-            columns.insert(columns.index("Time")+1, 0)
-            df.columns = columns
-            units.insert(columns.index(0), 0)
-            if "?" in str([ele for ele in AM_PM if(ele in list(df[0]))]):
-                df=df.replace({0:{'\?':'','\.':''}},regex=True) # Remove ? and .
-
-            try:
-                try:
-                    datetime_arr = pd.to_datetime(df["Date"]+" "+df["Time"]+" "+df[0],format="%m/%d/%Y %I:%M:%S %p")
-                except Exception:
-                    try:
-                        datetime_arr = pd.to_datetime(df["Date"]+" "+df["Time"]+" "+df[0],format="%d-%b-%y %I:%M:%S %p")
-                    except Exception:
-                        datetime_arr = pd.to_datetime(df["Date"]+" "+df["Time"]+" "+df[0],format="%Y-%m-%d %I:%M:%S %p")
-                arr = list(datetime_arr.values.astype(float) / 10 ** 9)
-                # if ref_date and abs(arr[0] - ref_date) > 30*24*60*60:
-                #     arr = list(
-                #         datetime_arr.values.astype(float) / 10 ** 9)
-                # df["time"] = arr
-                # return df
-            except Exception:
-                breakpoint()
-                log("Datetime file parse failed")
-                raise
-    else:           
-            if ("-" in df["Date"][df.index[0]]) and df["Date"][df.index[0]].find("-")==2:
-                try:
-                    dateformat='%d-%b-%y %H:%M:%S'
-                    arr = pd.to_datetime(df["Date"] + " " + df["Time"], format=dateformat).values.astype(float) / 10 ** 9
-                except Exception:
-                    try:
-                        dateformat='%d-%b-%y %H:%M:%S %p'
-                        arr = pd.to_datetime(df["Date"] + " " + df["Time"], format=dateformat).values.astype(float) / 10 ** 9
-                    except Exception:
-                        breakpoint()
-                        raise Exception("Datetime file parse failed")    
-            elif ("-" in df["Date"][df.index[0]]) and df["Date"][df.index[0]].find("-")==4:
-                try:
-                    dateformat='%Y-%m-%d %H:%M:%S'
-                    arr = pd.to_datetime(df["Date"] + " " + df["Time"], format=dateformat).values.astype(float) / 10 ** 9
-                except Exception:
-                    try:
-                        dateformat='%Y-%m-%d %H:%M:%S %p'
-                        arr = pd.to_datetime(df["Date"] + " " + df["Time"], format=dateformat).values.astype(float) / 10 ** 9
-                    except Exception:
-                        breakpoint()
-                        raise Exception("Datetime file parse failed")   
-            else:
-                try:
-                    dateformat='%m/%d/%Y %H:%M:%S'
-                    arr = pd.to_datetime(df["Date"] + " " + df["Time"], format=dateformat).values.astype(float) / 10 ** 9
-                except Exception:
-                    try:
-                        dateformat='%m/%d/%Y %H:%M:%S %p'
-                        arr = pd.to_datetime(df["Date"] + " " + df["Time"], format=dateformat).values.astype(float) / 10 ** 9
-                    except Exception:
-                        try: 
-                            dateformat='%d/%m/%Y %H:%M:%S'
-                            arr = pd.to_datetime(df["Date"] + " " + df["Time"], format=dateformat).values.astype(float) / 10 ** 9
-                        except Exception:
-                            try:
-                                dateformat='%d/%m/%Y %H:%M:%S %p'
-                                arr = pd.to_datetime(df["Date"] + " " + df["Time"], format=dateformat).values.astype(float) / 10 ** 9
-                            except Exception:
-                                breakpoint()
-                                raise Exception("Datetime file parse failed")
-                
-                
-                #arr = pd.to_datetime(df["Date"] + " " + df["Time"], dayfirst=day_month,dayfirst=day_month).values.astype(float) / 10 ** 9
-    if ref_date and abs(arr[0] - ref_date) > 30*24*60*60: # More than a month of difference between reference date --> invert day and month 
-        ind_day=dateformat.find('%d')
-        if '%b' in dateformat:
-            month_format='%b'    
-        else:
-            month_format='%m'
-        ind_month=dateformat.find(month_format) 
-        dateformat=dateformat[:ind_day]+month_format+dateformat[ind_day+2:]
-        dateformat=dateformat[:ind_month]+'%d'+dateformat[ind_month+2:]
-        arr = pd.to_datetime(df["Date"] + " " + df["Time"], format=dateformat).values.astype(float) / 10 ** 9
+        tnum (numpy array (n,) of floats): time as timestamp values (number of seconds since 01.01.1970)
+        Qval (numpy array (n,m) of floats): discharge in each of the m inflows as a function of time [m3.s-1]
+        TPval (numpy array (n,m) of floats): TP concentrations in each of the m inflows as a function of time [mg.m-3]
+        tbudget (numpy array (p,) of floats): time at which Pin must be computed, as timestamp values (number of seconds since 01.01.1970)
     
-    df["time"] = arr
-    return df 
         
-         
-    #--------------------------------------------------
-    # Previous code:      
-                
-        
-    #     if "IntD" in columns and "IntT" in columns:            
-    #         if bool([ele for ele in AM_PM if(ele in list(df["IntD"]))])==True:
-    #             input("Press Enter to continue...")
-    #             breakpoint()
-    #             del columns[-1]
-    #             columns.insert(columns.index("IntD"), 0) 
-    #             df.columns = columns
-    #             try:
-    #                 #datetime_arr = pd.to_datetime(df["IntD"]+" "+df["IntT"]+" "+df[0],format="%m/%d/%Y %I:%M:%S %p")
-    #                 datetime_arr = pd.to_datetime(df["IntD"] + " " + df["IntT"], format=dateformat, dayfirst=True)
-    #                 try:
-    #                     datetime_arr[df[df["IntD"] == "PM"].index] = datetime_arr[df[df["IntD"] == "PM"].index] + timedelta(hours=12)
-    #                 except: pass
-    #                 idx = np.argmin(np.diff(datetime_arr))
-    #                 if np.diff(datetime_arr)[idx].astype("float")<0:
-    #                     datetime_arr[idx+1:] = np.copy(datetime_arr[idx+1:]+timedelta(hours=12))
-    #                 arr = list(datetime_arr.values.astype(float) / 10 ** 9)
-    #                 if ref_date and abs(arr[0] - ref_date) > 30*24*60*60:
-    #                     arr = list(
-    #                         datetime_arr.values.astype(float) / 10 ** 9)
-    #                 df["time"] = arr
-    #                 return df
-    #             except:
-    #                 log("Datetime file parse failed")
-    #                 raise
-    #         if bool([ele for ele in AM_PM if(ele in list(df[0]))])==True:
-    #             if "?" in str([ele for ele in AM_PM if(ele in list(df[0]))]):
-    #                 df=df.replace({0:{'\?':'','\.':''}},regex=True) # Remove ? and .
-    #                 # for k_row in df.index: # Remove ? and .
-    #                 #     timestr=df.loc[k_row,0]
-    #                 #     timestr=timestr.replace('?','')
-    #                 #     timestr=timestr.replace('.','')
-    #                 #     df.loc[k_row,0]=timestr
-    #             try:
-    #                 datetime_arr = pd.to_datetime(df["IntD"]+" "+df["IntT"]+" "+df[0],format="%m/%d/%Y %I:%M:%S %p")
-    #                 # datetime_arr = pd.to_datetime(df["IntD"] + " " + df["IntT"], format=dateformat, dayfirst=True)
-    #                 # try:
-    #                 #     datetime_arr[df[df[0] == "PM"].index] = datetime_arr[df[df[0] == "PM"].index] + timedelta(hours=12)
-    #                 # except: pass
-    #                 # idx = np.argmin(np.diff(datetime_arr))
-    #                 # if np.diff(datetime_arr)[idx].astype("float")<0:
-    #                 #     datetime_arr[idx+1:] = np.copy(datetime_arr[idx+1:]+timedelta(hours=12))
-    #                 arr = list(datetime_arr.values.astype(float) / 10 ** 9)
-    #                 if ref_date and abs(arr[0] - ref_date) > 30*24*60*60:
-    #                     arr = list(
-    #                         datetime_arr.values.astype(float) / 10 ** 9)
-    #                 df["time"] = arr
-    #                 return df
-    #             except:
-    #                 datetime_arr = pd.to_datetime(df["IntD"]+" "+df["IntT"]+" "+df[0],format="%d-%b-%y %I:%M:%S %p")
-    #                 # datetime_arr = pd.to_datetime(df["IntD"] + " " + df["IntT"], format="%d-%b-%y %H:%M:%S")
-    #                 # try:
-    #                 #     datetime_arr[df[df[0] == "PM"].index] = datetime_arr[df[df[0] == "PM"].index] + timedelta(
-    #                 #         hours=12)
-    #                 # except:
-    #                 #     pass
-    #                 # idx = np.argmin(np.diff(datetime_arr))
-    #                 # if np.diff(datetime_arr)[idx].astype("float") < 0:
-    #                 #     datetime_arr[idx + 1:] = np.copy(datetime_arr[idx + 1:] + timedelta(hours=12))
-    #                 arr = list(datetime_arr.values.astype(float) / 10 ** 9)
-    #                 if ref_date and abs(arr[0] - ref_date) > 30 * 24 * 60 * 60:
-    #                     arr = list(
-    #                         datetime_arr.values.astype(float) / 10 ** 9)
-    #                 df["time"] = arr
-    #                 return df
-
-    #         else:
-    #             del columns[-1]
-    #             columns.insert(columns.index("IntT")+1, 0)
-    #             df.columns = columns
-    #             units.insert(columns.index(0), 0)
-    #             if "?" in str([ele for ele in AM_PM if(ele in list(df[0]))]):
-    #                 df=df.replace({0:{'\?':'','\.':''}},regex=True) # Remove ? and .
-    #                 # for k_row in df.index: # Remove ? and .
-    #                 #     timestr=df.loc[k_row,0]
-    #                 #     timestr=timestr.replace('?','')
-    #                 #     timestr=timestr.replace('.','')
-    #                 #     df.loc[k_row,0]=timestr
-    #             try:
-    #                 datetime_arr = pd.to_datetime(df["IntD"]+" "+df["IntT"]+" "+df[0],format="%m/%d/%Y %I:%M:%S %p")
-    #                 # datetime_arr = pd.to_datetime(df["IntD"] + " " + df["IntT"], format=dateformat, dayfirst=True)
-    #                 # try:
-    #                 #     datetime_arr[df[df[0] == "PM"].index] = datetime_arr[df[df[0] == "PM"].index] + timedelta(hours=12) 
-    #                 # except: pass
-    #                 # idx = np.argmin(np.diff(datetime_arr))
-    #                 # if np.diff(datetime_arr)[idx].astype("float")<0:
-    #                 #     datetime_arr[idx+1:] = np.copy(datetime_arr[idx+1:]+timedelta(hours=12))
-    #                 arr = list(datetime_arr.values.astype(float) / 10 ** 9)
-    #                 if ref_date and abs(arr[0] - ref_date) > 30*24*60*60:
-    #                     arr = list(
-    #                         datetime_arr.values.astype(float) / 10 ** 9)
-    #                 df["time"] = arr
-    #                 return df
-    #             except:
-    #                 log("Datetime file parse failed")
-    #                 raise
-        
-    #     if "IntDT" in columns and "IntDT1" in columns:
-    #         if bool([ele for ele in AM_PM if(ele in list(df["IntDT1"]))])==True:
-    #             del columns[-1]
-    #             columns.insert(columns.index("IntDT1"), 0) 
-    #             df.columns=columns
-    #             if "?" in str([ele for ele in AM_PM if(ele in list(df["IntDT1"]))]):
-    #                 df=df.replace({0:{'\?':'','\.':''}},regex=True) # Remove ? and .
-    #                 # for k_row in df.index: # Remove ? and .
-    #                 #     timestr=df.loc[k_row,0]
-    #                 #     timestr=timestr.replace('?','')
-    #                 #     timestr=timestr.replace('.','')
-    #                 #     df.loc[k_row,0]=timestr
-    #             try:
-    #                 datetime_arr = pd.to_datetime(df["IntDT1"]+" "+df["IntDT"]+" "+df[0],format="%m/%d/%Y %I:%M:%S %p")
-    #                 # datetime_arr = pd.to_datetime(df["IntDT1"] + " " + df["IntDT"], format=dateformat, dayfirst=True)
-    #                 # try:
-    #                 #     datetime_arr[df[df[0] == "PM"].index] = datetime_arr[df[df[0] == "PM"].index] + timedelta(hours=12) 
-    #                 # except: pass
-    #                 # idx = np.argmin(np.diff(datetime_arr))
-    #                 # if np.diff(datetime_arr)[idx].astype("float")<0:
-    #                 #     datetime_arr[idx+1:] = np.copy(datetime_arr[idx+1:]+timedelta(hours=12))
-    #                 arr = list(datetime_arr.values.astype(float) / 10 ** 9)
-    #                 if ref_date and abs(arr[0] - ref_date) > 30*24*60*60:
-    #                     arr = list(
-    #                         datetime_arr.values.astype(float) / 10 ** 9)
-    #                 df["time"] = arr
-    #                 return df
-    #             except:
-    #                 log("Datetime file parse failed")
-    #                 raise
-    #         if bool([ele for ele in AM_PM if(ele in list(df[0]))])==True:
-    #             if "?" in str([ele for ele in AM_PM if(ele in list(df[0]))]):
-    #                 df=df.replace({0:{'\?':'','\.':''}},regex=True) # Remove ? and .
-    #                 # for k_row in df.index: # Remove ? and .
-    #                 #     timestr=df.loc[k_row,0]
-    #                 #     timestr=timestr.replace('?','')
-    #                 #     timestr=timestr.replace('.','')
-    #                 #     df.loc[k_row,0]=timestr
-    #             try:
-    #                 datetime_arr = pd.to_datetime(df["IntDT"]+" "+df["IntDT1"]+" "+df[0],format="%m/%d/%Y %I:%M:%S %p")
-    #                 # datetime_arr = pd.to_datetime(df["IntDT"] + " " + df["IntDT1"], format=dateformat, dayfirst=True)
-    #                 # try:
-    #                 #     datetime_arr[df[df[0] == "PM"].index] = datetime_arr[df[df[0] == "PM"].index] + timedelta(hours=12) 
-    #                 # except: pass
-    #                 # idx = np.argmin(np.diff(datetime_arr))
-    #                 # if np.diff(datetime_arr)[idx].astype("float")<0: #Negative time due to change of day?
-    #                 #     datetime_arr[idx+1:] = np.copy(datetime_arr[idx+1:]+timedelta(hours=12))
-    #                 arr = list(datetime_arr.values.astype(float) / 10 ** 9)
-    #                 if ref_date and abs(arr[0] - ref_date) > 30*24*60*60:
-    #                     arr = list(
-    #                         datetime_arr.values.astype(float) / 10 ** 9)
-    #                 df["time"] = arr
-    #                 return df
-    #             except:
-    #                 log("Datetime file parse failed")
-    #                 raise
-    #         else:
-    #             del columns[-1]
-    #             columns.insert(columns.index("IntDT1")+1, 0)
-    #             df.columns = columns
-    #             units.insert(columns.index(0), 0) #adjusting units
-    #             if "?" in str([ele for ele in AM_PM if(ele in list(df[0]))]):
-    #                 df=df.replace({0:{'\?':'','\.':''}},regex=True) # Remove ? and .
-    #                 # for k_row in df.index: # Remove ? and .
-    #                 #     timestr=df.loc[k_row,0]
-    #                 #     timestr=timestr.replace('?','')
-    #                 #     timestr=timestr.replace('.','')
-    #                 #     df.loc[k_row,0]=timestr
-    #             try:
-    #                 try:
-    #                     datetime_arr = pd.to_datetime(df["IntDT"]+" "+df["IntDT1"]+" "+df[0],format="%m/%d/%Y %I:%M:%S %p")
-    #                     #datetime_arr = pd.to_datetime(df["IntDT"] + " " + df["IntDT1"], format=dateformat, dayfirst=True)
-    #                 except:
-    #                     datetime_arr = pd.to_datetime(df["IntDT"]+" "+df["IntDT1"]+" "+df[0],format="%d-%b-%y %I:%M:%S %p")
-    #                     # datetime_arr = pd.to_datetime(df["IntDT"] + " " + df["IntDT1"], format="%d-%b-%y %H:%M:%S",
-    #                                                   # dayfirst=True)
-    #                 # try:
-    #                 #     datetime_arr[df[df[0] == "PM"].index] = datetime_arr[df[df[0] == "PM"].index] + timedelta(hours=12) 
-    #                 # except: pass
-    #                 # idx = np.argmin(np.diff(datetime_arr))
-    #                 # if np.diff(datetime_arr)[idx].astype("float")<0:
-    #                 #     datetime_arr[idx+1:] = np.copy(datetime_arr[idx+1:]+timedelta(hours=12))
-    #                 arr = list(datetime_arr.values.astype(float) / 10 ** 9)
-    #                 if ref_date and abs(arr[0] - ref_date) > 30*24*60*60:
-    #                     arr = list(
-    #                         datetime_arr.values.astype(float) / 10 ** 9)
-    #                 df["time"] = arr
-    #                 return df
-    #             except:
-    #                 log("Datetime file parse failed")
-    #                 raise              
-        
-    # else: 
-    #     if "IntDT" in columns and "IntDT1" in columns:
-    #         try:
-    #             arr = list(pd.to_datetime(df["IntDT"] + " " + df["IntDT1"], dayfirst=True).values.astype(float) / 10 ** 9)
-    #             if ref_date and abs(arr[0] - ref_date) > 30*24*60*60:
-    #                 arr = list(pd.to_datetime(df["IntDT"] + " " + df["IntDT1"], dayfirst=False).values.astype(float) / 10 ** 9)
-    #             df["time"] = arr
-    #             return df
-    #         except:
-    #             log("Datetime file parse failed")
-    #             raise    
-    #     elif "IntD" in columns and "IntT" in columns:
-    #         try:
-    #             arr = list(pd.to_datetime(df["IntD"] + " " + df["IntT"], dayfirst=True).values.astype(float) / 10 ** 9)
-    #             if ref_date and abs(arr[0] - ref_date) > 30*24*60*60:
-    #                 arr = list(pd.to_datetime(df["IntD"] + " " + df["IntT"], dayfirst=False).values.astype(float) / 10 ** 9)
-    #             df["time"] = arr
-    #             return df
-    #         except:
-    #             log("Datetime file parse failed")
-    #             raise
-    #     elif "IntD" in columns and "IntD1" in columns:
-    #         try:
-    #             datetime_arr = pd.to_datetime(df["IntD"] + " " + df["IntD1"], format="%H:%M:%S %m/%d/%Y").values.astype(float) / 10 ** 9
-    #             df["time"] = datetime_arr
-    #             return df
-    #         except:
-    #             log("Datetime file parse failed")
-    #             raise
-    #     elif "IntT" in columns and "IntT1" in columns:
-    #         try:
-    #             datetime_arr = pd.to_datetime(df["IntT"] + " " + df["IntT1"], format="%H:%M:%S %m/%d/%Y").values.astype(float) / 10 ** 9
-    #             df["time"] = datetime_arr
-    #             return df
-    #         except:
-    #             log("Datetime file parse failed")
-    #             raise
-    #     else:
-    #         raise ValueError("Cannot process unrecognised file.")
-    
-
-    
-
-def parse_chl(df, variable, name, columns, units, ref_date, date_format):
-    if units == "g/l":
-        try:
-            log("Changed Chl unit")
-            return list(df[name] * 1000000)
-        except:
-            return [-999.] * len(df)
-        
-    else:
-        return [-999.] * len(df)
-
-def qa_std_moving(variable, xdata=np.array([]), window_size=15, factor=3, prior_flags=False):
-   """
-   Indicate outliers values based on std applied to moving average.
-   Parameters:
-       variable (np.array): Data array to which to apply the quality assurance
-       xdata (np.array): x-values used to resample the data (if not specified, data is not resample)
-       window_size (np.int): window size of data
-       factor (int): number n such that values higher than n*std are considered as outliers
-       prior_flags (np.array): An array of bools where True means non-trusted data
-   Returns:
-       flags (np.array): An array of bools where True means non-trusted data for this outlier dectection
-   """
-   if isinstance(prior_flags,np.ndarray): # Boolean array provided
-       flags = prior_flags
-   else: # No boolean array provided
-       flags=np.full(variable.shape,False)
-
-   if len(variable) < window_size:
-       print("ERROR! Window size is larger than array length.")
-   else:
-        # if ~np.any(xdata):
-        #     xdata:np.arange(len(variable))
-        #Interpolate data at constant intervals
-        # xinterp=np.linspace(np.min(xdata),np.max(xdata),len(variable))
-        # indsort=np.argsort(xdata)
-        # yinterp=np.interp(xinterp, xdata[indsort], variable[indsort])
-        # movmean=np.interp(xdata,xinterp,uniform_filter1d(yinterp,size=window_size))
-        movmean=uniform_filter1d(variable,size=window_size)
-        noise_data=abs(variable-movmean)
-        mask_std=noise_data>factor*np.std(noise_data)
-        flags=np.logical_or(flags,mask_std)
-   return flags
-
-def get_nc_data(nc):
-    """
-    Get the data from a netCDF file.
-    Inputs:
-        nc: netCDF object
     Outputs:
-        data_nc (dictionary): data for each variable of the netCDF file.
+        Pin_budget (numpy array (p,) of floats): total incoming (outgoing) P load as a function of time [tons-P.yr-1]
+    """
+
+    Pin=np.nansum(Qval*TPval,axis=1)*86400*365*1e-9
+    Pin_budget=np.interp(tbudget,tnum,Pin) # Linear interpolation
+    
+    return Pin_budget
+
+#%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+def average_between(xnew,xdata,ydata):
+    """
+    Computes the average between each x point
+    
+    """
+    xmean=xnew[:-1]+0.5*(xnew[1:]-xnew[:-1])
+    ymean=np.full(len(xnew)-1,np.nan)
+    for k in range(len(xmean)):
+        bool_avg=np.logical_and(xdata>=xnew[k],xdata<xnew[k+1])
+        if np.sum(bool_avg)>0:
+            ymean[k]=np.nanmean(ydata[bool_avg])
+    
+    return xmean,ymean
+    
+    
+
+#%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+def compute_river_load_from_curve(Qcurve,TPcurve,tnum,Qval,tbudget,method="power",calculation="interp"):
+    """Function compute_river_load_from_curve
+
+    Calculates the input (or output) of phosphorus from a Q-TP relationship applied to discharge values.
+
+    Inputs:
+        Qcurve (numpy array (n,m) of floats): discharge in each of the m inflows as a function of time [m3.s-1]
+        TPcurve (numpy array (n,m) of floats): TP concentrations in each of the m inflows as a function of time [mg.m-3]
+        tnum (numpy array (p,) of floats): time as timestamp values for which TPin must be estimated (number of seconds since 01.01.1970)
+        Qval (numpy array (p,m) of floats): discharge in each of the m inflows as a function of time for which TPin must be estimated [m3.s-1]
+        tbudget (numpy array (q,) of floats): time at which Pin must be computed, as timestamp values (number of seconds since 01.01.1970)
+        method (string): regression method, the only option is currently "power": TP=a*Q^b (other options can be added)
+       calculation (string): "interp" or "average"
+             
+    Outputs:
+        Pin_budget (numpy array (q or q-1,) of floats): total incoming (outgoing) P load as a function of time [tons-P.yr-1]
+        Qin_budget
+        tbudget_new (numpy array (q or q-1,) of floats): time at which Pin is computed (differs from tbudget if average calculation is used), as timestamp values (number of seconds since 01.01.1970)
+    """
+    # Compute curve
+    TPval=np.full(Qval.shape,np.nan)
+    if method=="power":
+        for kin in range(Qcurve.shape[1]):
+            bool_keep=np.logical_and(Qcurve[:,kin]>=0,TPcurve[:,kin]>=0)
+            regres= linregress(np.log(Qcurve[bool_keep,kin]),np.log(TPcurve[bool_keep,kin]))
+            param=[regres.slope,regres.intercept]
+            TPval[:,kin]=np.exp(np.polyval(param,np.log(Qval[Qval[:,kin]>=0,kin])))
+    Pin=np.nansum(Qval*TPval,axis=1)*86400*365*1e-9 
+    if calculation=="interp":
+        Pin_budget=np.interp(tbudget,tnum,Pin) # Linear interpolation
+        Qin_budget=np.interp(tbudget,tnum,np.nansum(Qval,axis=1)) # Linear interpolation
+        tbudget_new=tbudget
+    elif calculation=="average":
+        tbudget_new,Pin_budget=average_between(tbudget,tnum,Pin) # Average between dates
+        _,Qin_budget=average_between(tbudget,tnum,np.nansum(Qval,axis=1)) 
+    
+    return Pin_budget, Qin_budget, tbudget_new
+
+#%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+def compute_TP_2boxes(depthval,TPval,hepi):
+    """Function compute_TP_2boxes
+
+    Calculates the depth-averaged TP concentration in the epilimnion and in the hypolimnion.
+
+    Inputs:
+        depthval (numpy array (n,) of floats): depth values [m]
+        TPval (numpy array (n,m) of floats): TP concentrations as a function of depth and time [mg.m-3]
+        hepi (numpy array (m,) of floats): thermocline depth as a function of time, hepi=0 when complete mixing [m]
+            
+    Outputs:
+        TPepi (numpy array (m,) of floats): depth-averaged TP concentration in the epilimnion [mg.m-3]
+        TPhypo (numpy array (m,) of floats): depth-averaged TP concentration in the hypolimnion [mg.m-3]
+    """
+    TPepi=np.full(len(hepi),np.nan)
+    TPhypo=np.full(len(hepi),np.nan)
+    
+    for kt in range(len(hepi)):
+        # Calculation of TPhypo
+        bool_hypo=depthval>=hepi[kt]
+        bool_epi=depthval<hepi[kt]
+        if np.nansum(bool_hypo)>0: # At least one value in the hypolimnion
+            TPhypo[kt]=np.nanmean(TPval[bool_hypo,kt])
+        if np.nansum(bool_epi)>0: # At least one value in the epilimnion
+            TPepi[kt]=np.nanmean(TPval[bool_epi,kt])
+        else:
+            TPepi[kt]=TPhypo[kt]
+        if np.nansum(bool_hypo)==0:
+            TPhypo[kt]=TPepi[kt]
+    
+    return TPepi, TPhypo
+
+#%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+def extract_simstrat_T(filename):
+    """Function extract_simstrat_T
+
+    Extracts the data from a temperature Simstrat output file (".dat").
+
+    Inputs:
+        filename (string): path to the Simstrat file.
+        
+    Outputs:
+        tnum (numpy array (n,) of floats): time as timestamp values (number of seconds since 01.01.1970)
+        depthval (numpy array (m,) of floats): depth [m]
+        tempval (numpy array (m,n) of floats): water temperature [°C]
+    """
+    df_stratif=pd.read_csv(filename, sep=",",header=0)
+    daynb=df_stratif["Datetime"].to_numpy()
+    tnum=datetime(1981,1,1).replace(tzinfo=timezone.utc).timestamp()+daynb*86400
+    depthval=df_stratif.columns[1:].to_numpy().astype(float)
+    tempval=df_stratif.values[:,1:].astype(float)
+    
+    # Transpose matrix to have rows=depths, columns=time
+    tempval=tempval.transpose()
+    
+    # Reorder depths as positive values from surface to bottom
+    depthval=np.sort(-depthval)
+    tempval=np.flipud(tempval)
+    
+    return tnum, depthval, tempval
+
+
+#%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+def compute_anoxia_dates(datesval,tdate_start,hepi,zmax):
+    """Function compute_hepi_constant
+
+    Determines the anoxic period based as the period between the specified starting date and the end of the stratified period.
+
+    Inputs:
+        datesval (numpy array (n,) of datetime): dates for which the thermocline depth must be computed
+        tdate_start (datetime): starting date of the anoxic period every year (dd.mm.1900) 
+        hepi (numpy array (n,) of floats): thermocline depth [m]
+        zmax (float): lake maximum depth [m]
+        
+    Outputs:
+        bool_anox (numpy array (n,) of booleans): = True if anoxic, = False otherwise
+    """
+    bool_anox=np.full(len(datesval),False)
+    anox_before=False
+    for kt in range(len(datesval)):
+        if hepi[kt]<zmax: # stratified period
+            if not anox_before and datesval[kt]>datetime(datesval[kt].year,tdate_start.month,tdate_start.day): # Start of anoxic period
+                bool_anox[kt]=True
+                anox_before=True
+            elif anox_before: # already anoxic before
+                bool_anox[kt]=True
+        elif anox_before: # end of the anoxic period
+            anox_before=False
+    
+    return bool_anox
+    
+#%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+def compute_hepi_constant(datesval,tdate_start,tdate_end,hepi,zmax,filter_stratif=np.array([])):
+    """Function compute_hepi_constant
+
+    Computes time series of thermocline depths based on the stratification period and a constant thermocline depth.
+
+    Inputs:
+        datesval (numpy array (n,) of datetime): dates for which the thermocline depth must be computed
+        tdate_start (datetime): starting date of the stratified period (dd.mm.1900)
+        tdate_end (datetime): end date of the stratified period (dd.mm.1900)
+        hepi (float): thermocline depth [m]
+        zmax (float): lake maximum depth [m]
+        filter_stratif (numpy array (n,) of booleans): additional filter to apply on the data, =False to prevent stratified conditions between the start and ending dates
+        
+    Outputs:
+        hepi_val: time series of thermocline depths [m]
+    """
+    hepi_val=np.full(len(datesval),np.nan)
+    if not list(filter_stratif): # Empty
+        filter_stratif=np.full(len(datesval),True)
+    for kt in range(len(datesval)):
+        if datesval[kt]>datetime(datesval[kt].year,tdate_start.month,tdate_start.day) and \
+        datesval[kt]<datetime(datesval[kt].year,tdate_end.month,tdate_end.day): # Startified period
+            hepi_val[kt]=hepi
+        else:
+            hepi_val[kt]=zmax
+    
+    return hepi_val
+
+
+#%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+def movmean(X,windowsize,axis=0):
+    """Function movmean
+
+    Computes the moving average of an array centered at the given index.
+
+    Inputs:
+        X (numpy array (m,n) of floats): array to average
+        windowsize (int): size of the averaging window
+        axis (int): index of the axis along which the averaging is applied
+        
+    Outputs:
+        X_smooth (numpy array (m,n) of floats): smoothed array
+    """
+
+    if len(X.shape)==1:
+        X=np.expand_dims(X,axis=1)
+    if axis==1:
+        X=X.transpose()
+    X_smooth=np.full(X.shape,np.nan)
+    for k in range(X.shape[1]): 
+        df=pd.DataFrame({'val':X[:,k]})
+        X_smooth[:,k]=df.rolling(windowsize,center=True).mean().values[:,0]
+    if axis==1:
+        X_smooth=X_smooth.transpose()
+    return X_smooth
+
+#%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+def compute_hepi_varying(tnum_TP,tnum_T,depth_T,tempval,zmax,mingrad=0.05,windowsize=4):
+    """Function compute_hepi_varying
+
+    Computes time series of thermocline depths based on temperature data by calculating the depth of the maximal temperature gradient.
+
+    Inputs:
+        tnum_TP (numpy array (p,) of floats): timestamps for which the thermocline depth must be computed (number of seconds since 01.01.1970)
+        tnum_T (numpy array (n,) of floats): timestamps of the temperature data (number of seconds since 01.01.1970)
+        depth_T (numpy array (m,) of floats): depth values of the temperature data [m]
+        tempval (numpy array (m,n) of floats): water temperature as a function of depth and time [°C]
+        zmax (float): lake maximum depth [m]
+        mingrad (float): minimum temperature gradient below which the water column is considered fully mixed [°C/m]
+        windowsize (int): size of the averaging window for temperature vertical smoothing 
+        
+    Outputs:
+        hepi_val: time series of thermocline depths at time steps of interest [m]
+        hepi_all: time series of thermocline depths at time steps of temperature measurements [m]
+    """
+    hepi_all=np.full(len(tnum_T),np.nan)
+    
+    # Compute the thermocline depth for each day with temperature data
+    temp_smooth=movmean(tempval,windowsize)
+    depth_T=np.expand_dims(depth_T,axis=1) # (n,1) array
+    grad_temp=np.abs((temp_smooth[1:,:]-temp_smooth[:-1,:])/(depth_T[1:]-depth_T[:-1]))
+    bool_mixed=np.nanmax(grad_temp,axis=0)<mingrad
+    hepi_all[bool_mixed]=zmax
+    hepi_all[~bool_mixed]=depth_T[np.nanargmax(grad_temp[:,~bool_mixed],axis=0)].transpose()[0]
+    
+    # Linear interpolation to selected time steps:
+    hepi_val=np.interp(tnum_TP,tnum_T,hepi_all)
+      
+    
+    return hepi_val, hepi_all
+
+#%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+def compute_remobilization_Hanson(T_hypo,TP_sed,A_therm,a=-4.3,b=22.86,theta=1.172,Tbase=10):
+    """Function compute_remobilization_Hanson
+
+    Computes the phosphorus remobilization flux based on Hanson et al. (2020). 
+
+    Inputs:
+        T_hypo (numpy array (n,) of floats): hypolimnion temperature [°C]
+        TP_sed (float): phosphorus concentration at the sediment surface [mg-P/g-sed]
+        A_therm (numpy array (n,) of floats): surface area at the thermocline depth [m2]
+        a, b, theta, Tbase (float): empirical coefficients from Hanson et al. (2020)
+        
+    Outputs:
+        P_remob (numpy array (n,) of floats): phosphorus remobilization mass flux [tons-P/yr]
+    """
+    CF=a+b*TP_sed
+    P_remob=A_therm*CF*theta**(T_hypo-Tbase)*365*1e-9 # [tons-P/yr] 
+    # Note: P_remob=0 when A_therm==0 (fully mixed, no hypoxia)
+      
+    return P_remob
+    
+#%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+def compute_remobilization_Nurnberg(TP_sed,A_sed,a=0.8,b=0.76):
+    """Function compute_remobilization_Nurnberg
+
+    Computes the phosphorus remobilization flux based on Nürnberg (1988). 
+
+    Inputs:
+        TP_sed (float): phosphorus concentration at the sediment surface [mg-P/g-sed]
+        A_sed (numpy array (n,) of floats): sediment surface area below the thermocline [m2]
+        a, b (float): empirical coefficients from Nürnberg et al. (1988)
+        
+    Outputs:
+        P_remob (numpy array (n,) of floats): phosphorus remobilization mass flux [tons-P/yr]
+    """
+    P_remob=np.exp(a+b*np.log(TP_sed))*A_sed*365*1e-9 # [tons-P/yr]
+    # Note: P_remob=0 when A_sed==0 (fully mixed, no hypoxia)
+      
+    return P_remob
+
+#%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+def compute_remobilization_Carter(TP_epi,A_sed,a=-0.54,b=0.827):
+    """Function compute_remobilization_Carter
+
+    Computes the phosphorus remobilization flux based on Carter & Dzialowski (2012). 
+
+    Inputs:
+        TP_epi (numpy array (n,) of floats): TP concentration in the epilimnion [mg-P/m3]
+        A_sed (numpy array (n,) of floats): sediment surface area below the thermocline [m2]
+        a, b (float): empirical coefficients from Carter & Dzialowski (2012)
+        
+    Outputs:
+        P_remob (numpy array (n,) of floats): phosphorus remobilization mass flux [tons-P/yr]
+    """
+    P_remob=np.full(TP_epi.shape,np.nan)
+    P_remob[TP_epi<=0]=np.nan
+    P_remob[TP_epi>0]=np.exp(a+b*np.log(TP_epi[TP_epi>0]))*A_sed[TP_epi>0]*365*1e-9 # [tons-P/yr]
+    # Note: P_remob=0 when A_sed==0 (fully mixed, no hypoxia)
+      
+    return P_remob
+
+#%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+def compute_changes_TP(tnum_TP,TP_epi,TP_hypo,tnum_budget):
+    """Function compute_changes_TP
+
+    Computes the temporal changes in TP at the time steps specified for the P budget. 
+
+    Inputs:
+        tdate_TP (numpy array (n,) of floats): timestamps with TP data (number of seconds since 01.01.1970)
+        TP_epi (numpy array (n,) of floats): TP concentration in the epilimnion [mg-P/m3]
+        TP_hypo (numpy array (n,) of floats): TP concentration in the hypolimnion [mg-P/m3]
+        tnum_budget (numpy array (m,) of floats): timestamps when TP changes must be calculated (number of seconds since 01.01.1970)
+        
+    Outputs:
+        dTPepi_dt (numpy array (m,) of floats): temporal changes in epilimnetic TP [mg-P.m-3.s-1]
+        dTPhypo_dt (numpy array (m,) of floats): temporal changes in hypolimnetic TP [mg-P.m-3.s-1]
+    """
+    if tnum_TP[0]>=tnum_budget[0] or tnum_TP[-1]<=tnum_budget[-1]:
+        raise Exception("TP measurements are needed before and after the budget period")
+        
+    dTPepi_dt=np.full(len(tnum_budget),np.nan)
+    dTPhypo_dt=np.full(len(tnum_budget),np.nan)
+    
+    for kt in range (len(tnum_budget)):
+        ind_before=np.where(tnum_TP<tnum_budget[kt])[0][-1]
+        ind_after=np.where(tnum_TP>tnum_budget[kt])[0][0]
+        dTPepi_dt[kt]=(TP_epi[ind_after]-TP_epi[ind_before])/(tnum_TP[ind_after]-tnum_TP[ind_before]) # [mg-P.m-3.s-1]
+        dTPhypo_dt[kt]=(TP_hypo[ind_after]-TP_hypo[ind_before])/(tnum_TP[ind_after]-tnum_TP[ind_before]) # [mg-P.m-3.s-1]
+    
+    return dTPepi_dt, dTPhypo_dt
+
+#%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+def compute_gross_sed_Hanson(Pin,TP_epi,T_epi,V_epi,C_pp=0.5,C_sed=0.0137,theta_sed=1.065,Tbase_sed=10):
+    """Function compute_gross_sed_Hanson
+
+    Computes the phosphorus gross sedimentation flux based on Hanson et al. (2020). 
+
+    Inputs:
+        Pin (numpy array (n,) of floats): input phosphorus load [tons-P/yr]
+        TP_epi (numpy array (n,) of floats): TP concentration in the epilimnion [mg-P.m-3]
+        T_epi (numpy array (n,) of floats): epilimnion temperature [°C]
+        V_epi (numpy array (n,) of floats): epilimnion volume [m3]
+        C_pp (float): fraction of Pin that is particulate P
+        C_sed (float): first-order decay rate for the epilimnetic P pool [day-1]
+        theta_sed (float): Arrhenius coefficient for temperature scaling of sedimentation
+        Tbase_sed (float): base temperature for sedimentation temperature scaling [°C]
+        
+    Outputs:
+        P_gross (numpy array (n,) of floats): gross phosphorus sedimentation flux [tons-P/yr]
     """
     
-    varnames=list(nc.variables)
-    data_nc=dict()
+    P_gross=Pin*C_pp+V_epi*TP_epi*C_sed*theta_sed**(T_epi-Tbase_sed)*365*1e-9 # [tons-P/yr]
+    return P_gross
     
-    for key in varnames:
-        data_nc[key]=nc.variables[key][:].data
-    return data_nc
+#%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+def compute_net_sed_Vollenweider(TP,sigma_max,V,P_NS_max=np.nan):
+    """Function compute_net_sed_Vollenweider
+
+    Computes the net phosphorus sedimentation flux with the Vollenweider method.
+
+    Inputs:
+        TP (numpy array (n,) of floats): depth-averaged TP concentrations [mg-P/m3]
+        sigma_max (float): maximal net sedimentation rate reached for low TP concentrations (slope of the linear relationship P_NS=f(TP)) [yr-1]
+        V (float): lake volume [m3]
+        P_NS_max (float): maximal net sedimentation flux, reached for high TP concentrations [tons-P/yr]. If nan, only linear relationship is used.
+        
+        
+    Outputs:
+        P_NS (numpy array (n,) of floats): net phosphorus sedimentation flux [tons-P/m3]
+    """   
+    
+    P_NS=np.full(TP.shape,np.nan)
+    
+    if np.isnan(P_NS_max):
+        P_NS=sigma_max*TP*V*1e-9 
+    else:
+        TPcrit=P_NS_max*1e9/(sigma_max*V) # TP concentration where the two models meet [mg/m3] 
+        P_NS[TP<TPcrit]=sigma_max*TP[TP<TPcrit]*V*1e-9 
+        P_NS[TP>=TPcrit]=P_NS_max
+    
+    return P_NS
+
+#%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+def compute_stratified_periods(tnum,hepi,zmax):
+    """Function compute_stratified_periods
+
+    Computes the starting and ending time of each stratified periods from the time series of thermocline depths.
+
+    Inputs:
+        tnum_budget (numpy array (n,) of floats): timestamps when thermocline depth is known (number of seconds since 01.01.1970)
+        hepi (numpy array (n,) of floats): thermocline depth [m]
+        zmax (float): maximum lake depth [m]
+    Outputs:
+        tnum_stratif (numpy array (2,m) of floats): timestamps for start and end of each stratified period (number of seconds since 01.01.1970)
+    """  
+    
+    ind_stratif=np.where(hepi<zmax)[0]
+    ind_start=ind_stratif[np.concatenate((np.array([True]),np.diff(ind_stratif)>1))] # First index of each stratified period
+    ind_end=np.full(len(ind_start),np.nan)
+    tnum_periods=np.full((2,len(ind_start)),np.nan)
+    for kt in range(len(ind_start)):
+        if kt<len(ind_start)-1:
+            ind_end=ind_start[kt]+np.where(hepi[ind_start[kt]:ind_start[kt+1]]<zmax)[0][-1]
+        else:
+            ind_end=ind_start[kt]+np.where(hepi[ind_start[kt]:]<zmax)[0][-1]
+        tnum_periods[:,kt]=np.array([tnum[ind_start[kt]],tnum[ind_end]])
+
+    return tnum_periods
+
+#%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+def compute_period_to_anoxia(z_hypo,Fred=0.36,C0=11,delta=0.82e-3,DO2=1e-4):
+    """Function compute_period_to_anoxia
+
+    Computes the duration of the stratified period before the start of anoxia, following Müller et al. (2012).
+
+    Inputs:
+        z_hypo (float): average thickness of the hypolimnion [m]
+        Fred (float): areal flux of reduced substances to the hypolimnion water [g-O2 m-2 d-1]
+        C0 (float): initial O2 concentration in the hypolimnion at the beginning of the stratified period (spring) [mg L-1]
+        delta (float): thickness of the diffusive boundary layer [m]
+        DO2 (float): molecular O2 diffusion coefficient [m2 d-1]
+    Outputs:
+        delta_t (float): duration of the period between the start of stratification and anoxic conditions in the hypolimnion [days]
+    """  
+    delta_t=delta/DO2*z_hypo*np.log(1+DO2*C0/(Fred*delta))
+    return delta_t
+
+#%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+def compute_anoxia_red(tnum_budget,hepi_model,z_mean,Fred=0.36,C0=11,delta=0.82e-3,DO2=1e-4,tnum_stratif=np.array([])):
+    """Function compute_anoxia_red
+
+    Computes when anoxic conditions occur in the hypolimnion, based on the empirical relationship from Müller et al. (2012).
+
+    Inputs:
+        tnum_budget (numpy array (n,) of floats): timestamps when thermocline depth is known (number of seconds since 01.01.1970)
+        hepi_model (numpy array (n,) of floats): thermocline depth of the box model (the lake is mixed when the thermocline depth reaches the lake mean depth) [m]
+        z_mean (float): mean lake depth [m]
+        Fred (float): areal flux of reduced substances to the hypolimnion water [g-O2 m-2 d-1]
+        C0 (float): initial O2 concentration in the hypolimnion at the beginning of the stratified period (spring) [mg L-1]
+        delta (float): thickness of the diffusive boundary layer [m]
+        DO2 (float): molecular O2 diffusion coefficient [m2 d-1]
+        tnum_stratif (numpy array (2,m) of floats): timestamps for start and end of each stratified period (number of seconds since 01.01.1970)
+    Outputs:
+        bool_anoxic (numpy array (n,) of booleans): =True during anoxic period, =False otherwise
+        ndays_to_anox (numpy array (p,) of booleans): number of days nefore reaching anoxia for each stratified period
+        tstart_anox (numpy array (p,) of booleans): timestamps when anoxic period starts (number of seconds since 01.01.1970)
+    """  
+    
+    bool_anoxic=np.full(len(tnum_budget),False)
+    ind_stratif=np.where(hepi_model<z_mean)[0]
+    ind_start=ind_stratif[np.concatenate((np.array([True]),np.diff(ind_stratif)>1))] # First index of each stratified period
+    ndays_to_anox=np.full(len(ind_start),np.nan)
+    tstart_anox=np.full(len(ind_start),np.nan)
+    # Compute delta_t anox for each stratified period
+    for kp in range(len(ind_start)):
+        if kp<len(ind_start)-1:
+            ind_periods=np.arange(ind_start[kp],ind_start[kp]+np.where(hepi_model[ind_start[kp]:ind_start[kp+1]]<z_mean)[0][-1]+1,1)
+        else:
+            ind_periods=np.arange(ind_start[kp],ind_start[kp]+np.where(hepi_model[ind_start[kp]:]<z_mean)[0][-1]+1,1)
+        z_hypo_mean=np.nanmean(z_mean-hepi_model[ind_periods]) # Mean thickness of the hypolimnion during the stratified period
+        ndays_to_anox[kp]=compute_period_to_anoxia(z_hypo_mean,Fred,C0,delta,DO2) # Time required before reaching anoxia [days]
+        if list(tnum_stratif): # Detailed stratified periods are specified
+            ind_stratif_period=np.where(np.logical_and(tnum_budget[ind_start[kp]]>=tnum_stratif[0,:],tnum_budget[ind_start[kp]]<tnum_stratif[1,:]))[0][0]
+            tstratif_0=tnum_stratif[0,ind_stratif_period]
+            tstratif_end=tnum_stratif[1,ind_stratif_period]
+        else: # Use the thermocline depth provided
+            tstratif_0=tnum_budget[ind_periods[0]]
+            tstratif_end=tnum_budget[ind_periods[-1]]
+        
+        if (tstratif_end-tstratif_0)/86400>ndays_to_anox[kp]: # Stratified period is long enough to reach anoxia
+            tstart_anox[kp]=tstratif_0+ndays_to_anox[kp]*86400    
+            ind_anox=np.where(tnum_budget>=tstart_anox[kp])[0][0]
+            bool_anoxic[ind_anox:ind_periods[-1]+1]=True
+ 
+    return bool_anoxic,ndays_to_anox,tstart_anox
+
+#%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+def predict_TP_model(tnum_rivers,bool_anoxic,Pin,Qout,hepi,TPepi0,TPhypo0,TPsed,z_hypso,A_hypso,Thypo=np.array([]),Tepi=np.array([]),sigma_max=np.nan,P_NS_max=np.nan,k_sigma=10,Kz=1e-7,zout=0,method_sed="Vollenweider",method_remob="average"):
+    """Function predict_TP_model
+
+    Predicts TPepi and TPhypo based on a two-box model. 
+
+    Inputs:
+        tnum_rivers (numpy array (n,) of floats): timestamps with river data Pin and Qout (number of seconds since 01.01.1970)
+        bool_anoxic (numpy array (n,) of booleans): =True during anoxic period, =False otherwise
+        Pin (numpy array (n,) of floats): input P load from rivers computed as Pin=Qin*TPin [tons-P/yr]
+        Qout (numpy array (n,) of floats): outflow set equal to Qin by assuming that there is no change of water level [m3/s]
+        hepi (numpy array (n,) of floats): real thermocline depth [m]
+        TPhypo0 (float): initial TP concentration in the hypolimnion [mg-P/m3]
+        TPepi0 (float): initial TP concentration in the epilimnion [mg-P/m3]
+        TPsed (float): phosphorus concentration at the sediment surface [mg-P/g-sed] 
+        z_hypso (numpy array (m,) of floats): depth values where the lake area is provided [m] 
+        A_hypso (numpy array (m,) of floats): lake area at the depth values z_hypso [m2] 
+        Thypo (numpy array (n,) of floats): hypolimnion temperature [°C], if nan the remobilization rate is not estimated with the Hanson method
+        Tepi (numpy array (n,) of floats): epilimnion temperature [°C], if nan the gross sedimentation rate cannot be estimated with the Hanson method
+        sigma_max (float): maximal net sedimentation rate reached for low TP concentrations (slope of the linear relationship P_NS=f(TP)) [yr-1]. If nan, estimated from z_mean.
+        P_NS_max (float): maximal net sedimentation flux, reached for high TP concentrations [tons-P/yr]. If nan, only linear relationship is used.
+        k_sigma (float): empirical coefficient to compute sigma_max as sigma_max=k_sigma/z_mean [m.yr-1], common range is 8-16 (Müller et al., 2014) 
+        Kz (float): vertical turbulent diffusivity [m2/s] 
+        zout (float): depth of the outflow [m]
+        method_sed (string): method to compute sedimentation, options are "Hanson" (gross sedimentation) or "Vollenweider" (net sedimentation)
+        method_remob (string): method to compute remobilizaztion, options are "Nurnberg", "Hanson", "Carter" or "average"
+    
+    Outputs:
+        tnum_predict (numpy array (n+1,) of floats): timestamps when TP is computed, including initial values (number of seconds since 01.01.1970)
+        TPepi (numpy array (n+1,) of floats): average epilimnetic TP [tons-P.m-3.yr-1]
+        TPepi_range (numpy array (2,n+1) of floats): minimum and maximum epilimnetic TP [tons-P.m-3.yr-1]
+        TPhypo (numpy array (n+1,) of floats): average hypolimnetic TP [tons-P.m-3.yr-1]
+        TPhypo_range (numpy array (2,n+1) of floats): minimum and maximum hypolimnetic TP [tons-P.m-3.yr-1]
+        P_fluxes (dictionary of numpy arrays (n,) of floats): phosphorus fluxes Pin, Pout_epi, Pout_hypo, Premob, Pnet_sed, Pz [tons-P.yr-1]
+        param
+    """  
+    
+    # Lake parameters
+    A0=A_hypso[z_hypso==0]
+    V_hypso=np.concatenate((np.mean([A_hypso[1:],A_hypso[:-1]],axis=0)*(z_hypso[1:]-z_hypso[:-1]),np.array([0]))) # Volume of each layer [m3]
+    V_lake=np.nansum(V_hypso) # [m3]
+    z_mean=V_lake/A0 # Mean lake depth [m]
+    #z_max=np.nanmax(z_hypso) # Maximum lake depth [m]
+    
+    # Initialization
+    Pout_epi=np.full(len(tnum_rivers),np.nan)
+    Pout_hypo=np.full(len(tnum_rivers),np.nan)
+    Pz=np.full(len(tnum_rivers),np.nan)
+    Pnet_sed=np.full(len(tnum_rivers),np.nan)
+    Premob=np.full(len(tnum_rivers),np.nan)
+    Premob_range=np.full((2,len(tnum_rivers)),np.nan)
+    
+    #tnum_predict=np.concatenate((np.array([tnum_rivers[0]-0.5*(tnum_rivers[1]-tnum_rivers[0])]),0.5*(tnum_rivers[:-1]+tnum_rivers[1:]),np.array([tnum_rivers[-1]+0.5*(tnum_rivers[-1]-tnum_rivers[-2])])))
+    tnum_predict=np.copy(tnum_rivers)
+    TPepi=np.full(len(tnum_predict),np.nan)
+    TPepi_range=np.full((2,len(tnum_predict)),np.nan)
+    TPhypo=np.full(len(tnum_predict),np.nan)
+    TPhypo_range=np.full((2,len(tnum_predict)),np.nan)
+    TPepi[0]=TPepi0
+    TPhypo[0]=TPhypo0
+    TPepi_range[:,0]=np.array([TPepi0,TPepi0])
+    TPhypo_range[:,0]=np.array([TPhypo0,TPhypo0])
+    
+    # Computation (temporal loop)
+    for kt in range(len(tnum_rivers)-1):
+        delta_t=tnum_predict[kt+1]-tnum_predict[kt] # [s]
+        Atherm=A_hypso[np.where(z_hypso>=hepi[kt])[0][0]] 
+        Vepi=np.nansum(V_hypso[z_hypso<=hepi[kt]])
+        
+        
+        # 1. Vertical turbulent flux (=0 if fully mixed)
+        Pz[kt]=2*Kz*Atherm*(TPhypo[kt]-TPepi[kt])/z_mean*86400*365*1e-9 # [tons-P yr-1]
+        
+        # 2. Outflow
+        if zout<hepi[kt]:
+            Pout_epi[kt]=Qout[kt]*TPepi[kt]*86400*365*1e-9 # [tons-P yr-1]
+            Pout_hypo[kt]=0
+        else:
+            Pout_epi[kt]=0
+            Pout_hypo[kt]=Qout[kt]*TPhypo[kt]*86400*365*1e-9 # [tons-P yr-1]
+  
+        
+        # 3. Remobilization
+        if bool_anoxic[kt]: # Anoxic period
+            if hepi[kt]==np.max(z_hypso):
+                raise Exception('The lake cannot be anoxic during mixing periods')
+            if list(Thypo): # Not empty
+                Premob_Hanson=compute_remobilization_Hanson(Thypo[kt],TPsed,Atherm) # [tons-P yr-1]
+            else:
+                Premob_Hanson=np.nan
+            Premob_Nurnberg=compute_remobilization_Nurnberg(TPsed,Atherm) # [tons-P yr-1]
+            Premob_Carter=compute_remobilization_Carter(TPepi[kt],Atherm) # [tons-P yr-1]
+        
+            if method_remob=="Nurnberg":
+                Premob[kt]=Premob_Nurnberg
+            elif method_remob=="Hanson":
+                Premob[kt]=Premob_Hanson
+            elif method_remob=="Carter":
+                Premob[kt]=Premob_Carter
+            else:
+                Premob[kt]=np.nanmean(np.array([Premob_Hanson,Premob_Nurnberg,Premob_Carter]))
+            Premob_range[:,kt]=np.array([np.nanmin([Premob_Hanson,Premob_Nurnberg,Premob_Carter]),np.nanmax([Premob_Hanson,Premob_Nurnberg,Premob_Carter])])
+        else:
+            Premob[kt]=0
+            Premob_range[:,kt]=np.array([0,0])
+            
+        # 4. Net sedimentation
+        if method_sed=="Vollenweider":
+            TP_lake=TPepi[kt]*Vepi/V_lake+TPhypo[kt]*(V_lake-Vepi)/V_lake
+            if np.isnan(sigma_max): # Value not specified
+                sigma_max=k_sigma/z_mean # [yr-1]
+            
+            Pnet_sed[kt]=compute_net_sed_Vollenweider(TP_lake,sigma_max,V_lake,P_NS_max)
+        elif method_sed=="Hanson" and list(Tepi):
+            Pgross=compute_gross_sed_Hanson(Pin[kt],TPepi[kt],Tepi[kt],Vepi,C_pp=0.5) # [tons-P/yr]
+            if Pgross>Premob[kt]:
+                Pnet_sed[kt]=Pgross-Premob[kt]
+            else:
+                Pnet_sed[kt]=0
+        else:
+            raise Exception("Wrong sedimentation method")
+        
+        # 5. Phosphorus transfer due to thermocline vertical motion
+        Vepi_new=np.nansum(V_hypso[z_hypso<=hepi[kt+1]])
+        dV_epi=Vepi_new-Vepi # [m3]
+        if dV_epi>0: # Thermocline deepening
+            dmass=dV_epi*TPhypo[kt] # > 0, [mg]
+        else: # Thermocline rise (or zero)
+            dmass=dV_epi*TPepi[kt] # < 0, [mg]
+        
+        TPepi[kt+1]=(TPepi[kt]*Vepi+dmass+1e9/(86400*365)*delta_t*(Pin[kt]-Pout_epi[kt]-Premob[kt]-Pnet_sed[kt]+Pz[kt]))/Vepi_new # [mg.m-3]
+        TPepi_range[:,kt+1]=np.array([(TPepi_range[0,kt]*Vepi+dmass+1e9/(86400*365)*delta_t*(Pin[kt]-Pout_epi[kt]-Premob_range[1,kt]-Pnet_sed[kt]+Pz[kt]))/Vepi_new,\
+                              (TPepi_range[1,kt]*Vepi+dmass+1e9/(86400*365)*delta_t*(Pin[kt]-Pout_epi[kt]-Premob_range[0,kt]-Pnet_sed[kt]+Pz[kt]))/Vepi_new]) # [mg.m-3]
+        
+        if TPepi[kt+1]<0:
+            TPepi[kt+1]=0
+        TPepi_range[TPepi_range[:,kt+1]<0,kt+1]=0
+        # Note:
+            # If fully mixed: Pz=0, Premob=0 (because always oxic) -> only Pin, Pout and Pnet_sed
+            # If stratified but oxic: Premob=0
+        
+        if hepi[kt+1]<np.max(z_hypso): # Stratified
+            TPhypo[kt+1]=(TPhypo[kt]*(V_lake-Vepi)-dmass+1e9/(86400*365)*delta_t*(Premob[kt]-Pz[kt]-Pout_hypo[kt]))/(V_lake-Vepi_new) # [mg.m-3]
+            TPhypo_range[:,kt+1]=np.array([(TPhypo_range[0,kt]*(V_lake-Vepi)-dmass+1e9/(86400*365)*delta_t*(Premob_range[0,kt]-Pz[kt]-Pout_hypo[kt]))/(V_lake-Vepi_new),\
+                                            (TPhypo_range[1,kt]*(V_lake-Vepi)-dmass+1e9/(86400*365)*delta_t*(Premob_range[1,kt]-Pz[kt]-Pout_hypo[kt]))/(V_lake-Vepi_new)]) # [mg.m-3]
+            # If oxic: TPhypo is only driven by Pz because gross sedimentation=net sedimentation
+        else: # Fully mixed
+            TPhypo[kt+1]=TPepi[kt+1]
+            TPhypo_range[:,kt+1]=TPepi_range[:,kt+1]
+            
+        if TPhypo[kt+1]<0:
+            TPhypo[kt+1]=0
+        TPhypo_range[TPhypo_range[:,kt+1]<0,kt+1]=0
+            
+    P_fluxes={"Pin":Pin,"Pout_epi":Pout_epi,"Pout_hypo":Pout_hypo,"Premob":Premob,"Pnet_sed":Pnet_sed,"Pz":Pz}
+    param={"sigma_max":sigma_max}
+    return tnum_predict,TPepi,TPepi_range,TPhypo,TPhypo_range, P_fluxes, param
