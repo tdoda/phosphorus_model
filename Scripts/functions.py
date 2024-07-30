@@ -77,10 +77,11 @@ def compute_river_load_from_curve(Qcurve,TPcurve,tnum,Qval,tbudget,method="power
     TPval=np.full(Qval.shape,np.nan)
     if method=="power":
         for kin in range(Qcurve.shape[1]):
-            bool_keep=np.logical_and(Qcurve[:,kin]>=0,TPcurve[:,kin]>=0)
+            bool_keep=np.logical_and(Qcurve[:,kin]>0,TPcurve[:,kin]>0)
             regres= linregress(np.log(Qcurve[bool_keep,kin]),np.log(TPcurve[bool_keep,kin]))
             param=[regres.slope,regres.intercept]
-            TPval[:,kin]=np.exp(np.polyval(param,np.log(Qval[Qval[:,kin]>=0,kin])))
+
+            TPval[Qval[:,kin]>0,kin]=np.exp(np.polyval(param,np.log(Qval[Qval[:,kin]>0,kin])))
     Pin=np.nansum(Qval*TPval,axis=1)*86400*365*1e-9 
     if calculation=="interp":
         Pin_budget=np.interp(tbudget,tnum,Pin) # Linear interpolation
@@ -391,7 +392,7 @@ def compute_gross_sed_Hanson(Pin,TP_epi,T_epi,V_epi,C_pp=0.5,C_sed=0.0137,theta_
     return P_gross
     
 #%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-def compute_net_sed_Vollenweider(TP,sigma_max,V,P_NS_max=np.nan):
+def compute_net_sed_Vollenweider(TP,sigma_max,V,P_NS_max=np.nan,TPcrit=np.nan):
     """Function compute_net_sed_Vollenweider
 
     Computes the net phosphorus sedimentation flux with the Vollenweider method.
@@ -401,20 +402,25 @@ def compute_net_sed_Vollenweider(TP,sigma_max,V,P_NS_max=np.nan):
         sigma_max (float): maximal net sedimentation rate reached for low TP concentrations (slope of the linear relationship P_NS=f(TP)) [yr-1]
         V (float): lake volume [m3]
         P_NS_max (float): maximal net sedimentation flux, reached for high TP concentrations [tons-P/yr]. If nan, only linear relationship is used.
-        
+        TPcrit (float): critical TP concentration above which sigma is not constant [mg-P/m3]
         
     Outputs:
         P_NS (numpy array (n,) of floats): net phosphorus sedimentation flux [tons-P/m3]
     """   
     
     P_NS=np.full(TP.shape,np.nan)
-    
-    if np.isnan(P_NS_max):
-        P_NS=sigma_max*TP*V*1e-9 
-    else:
-        TPcrit=P_NS_max*1e9/(sigma_max*V) # TP concentration where the two models meet [mg/m3] 
+    if not np.isnan(P_NS_max) and not np.isnan(TPcrit): # Compute sigma_max
+        sigma_max=P_NS_max*1e9/(TPcrit*V) # [yr-1]
         P_NS[TP<TPcrit]=sigma_max*TP[TP<TPcrit]*V*1e-9 
         P_NS[TP>=TPcrit]=P_NS_max
+    elif np.isnan(P_NS_max) and not np.isnan(sigma_max):
+        P_NS=sigma_max*TP*V*1e-9 
+    elif not np.isnan(sigma_max):
+        TPcrit2=P_NS_max*1e9/(sigma_max*V) # TP concentration where the two models meet [mg/m3] 
+        P_NS[TP<TPcrit2]=sigma_max*TP[TP<TPcrit2]*V*1e-9 
+        P_NS[TP>=TPcrit2]=P_NS_max
+    else:
+        raise Exception("Not enough parameters were provided")
     
     return P_NS
 
@@ -513,7 +519,7 @@ def compute_anoxia_red(tnum_budget,hepi_model,z_mean,Fred=0.36,C0=11,delta=0.82e
     return bool_anoxic,ndays_to_anox,tstart_anox
 
 #%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-def predict_TP_model(tnum_rivers,bool_anoxic,Pin,Qout,hepi,TPepi0,TPhypo0,TPsed,z_hypso,A_hypso,Thypo=np.array([]),Tepi=np.array([]),sigma_max=np.nan,P_NS_max=np.nan,k_sigma=10,Kz=1e-7,zout=0,method_sed="Vollenweider",method_remob="average"):
+def predict_TP_model(tnum_rivers,bool_anoxic,Pin,Qout,hepi,TPepi0,TPhypo0,TPsed,z_hypso,A_hypso,Thypo=np.array([]),Tepi=np.array([]),sigma_max=np.nan,P_NS_max=np.nan,TPcrit=np.nan,k_sigma=10,Kz=1e-7,zout=0,method_sed="Vollenweider",method_remob="average"):
     """Function predict_TP_model
 
     Predicts TPepi and TPhypo based on a two-box model. 
@@ -528,11 +534,12 @@ def predict_TP_model(tnum_rivers,bool_anoxic,Pin,Qout,hepi,TPepi0,TPhypo0,TPsed,
         TPepi0 (float): initial TP concentration in the epilimnion [mg-P/m3]
         TPsed (float): phosphorus concentration at the sediment surface [mg-P/g-sed] 
         z_hypso (numpy array (m,) of floats): depth values where the lake area is provided [m] 
-        A_hypso (numpy array (m,) of floats): lake area at the depth values z_hypso [m2] 
+        A_hypso (numpy array (m,) of floats): lake area at the depth values z_hypso [m2]
         Thypo (numpy array (n,) of floats): hypolimnion temperature [°C], if nan the remobilization rate is not estimated with the Hanson method
         Tepi (numpy array (n,) of floats): epilimnion temperature [°C], if nan the gross sedimentation rate cannot be estimated with the Hanson method
         sigma_max (float): maximal net sedimentation rate reached for low TP concentrations (slope of the linear relationship P_NS=f(TP)) [yr-1]. If nan, estimated from z_mean.
         P_NS_max (float): maximal net sedimentation flux, reached for high TP concentrations [tons-P/yr]. If nan, only linear relationship is used.
+        TPcrit (float): critical TP concentration above which sigma is not constant [mg-P/m3]
         k_sigma (float): empirical coefficient to compute sigma_max as sigma_max=k_sigma/z_mean [m.yr-1], common range is 8-16 (Müller et al., 2014) 
         Kz (float): vertical turbulent diffusivity [m2/s] 
         zout (float): depth of the outflow [m]
@@ -622,9 +629,9 @@ def predict_TP_model(tnum_rivers,bool_anoxic,Pin,Qout,hepi,TPepi0,TPhypo0,TPsed,
         if method_sed=="Vollenweider":
             TP_lake=TPepi[kt]*Vepi/V_lake+TPhypo[kt]*(V_lake-Vepi)/V_lake
             if np.isnan(sigma_max): # Value not specified
-                sigma_max=k_sigma/z_mean # [yr-1]
-            
-            Pnet_sed[kt]=compute_net_sed_Vollenweider(TP_lake,sigma_max,V_lake,P_NS_max)
+                if np.isnan(TPcrit) or np.isnan(P_NS_max):
+                    sigma_max=k_sigma/z_mean # [yr-1]
+            Pnet_sed[kt]=compute_net_sed_Vollenweider(TP_lake,sigma_max,V_lake,P_NS_max,TPcrit)
         elif method_sed=="Hanson" and list(Tepi):
             Pgross=compute_gross_sed_Hanson(Pin[kt],TPepi[kt],Tepi[kt],Vepi,C_pp=0.5) # [tons-P/yr]
             if Pgross>Premob[kt]:
