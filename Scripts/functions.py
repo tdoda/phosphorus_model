@@ -272,7 +272,7 @@ def compute_hepi_varying(tnum_TP,tnum_T,depth_T,tempval,zmax,mingrad=0.05,window
     hepi_all[~bool_mixed]=depth_T[np.nanargmax(grad_temp[:,~bool_mixed],axis=0)].transpose()[0]
     
     # Linear interpolation to selected time steps:
-    hepi_val=np.interp(tnum_TP,tnum_T,hepi_all)
+    hepi_val=np.interp(tnum_TP,tnum_T,hepi_all,left=np.nan,right=np.nan)
       
     
     return hepi_val, hepi_all
