@@ -10,12 +10,12 @@ import os
 import math
 import numpy as np
 import pandas as pd
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, UTC
 from scipy.stats import linregress
 
 
 #%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-def compute_river_load_from_obs(tnum,Qval,TPval,tbudget):
+def compute_river_load_from_obs(tnum,Qval,TPval,tbudget, calculation="interp"):
     """Function compute_river_load_from_obs
 
     Calculates the input (or output) of phosphorus from measurements of discharge and TP in rivers and point sources.
@@ -25,31 +25,59 @@ def compute_river_load_from_obs(tnum,Qval,TPval,tbudget):
         Qval (numpy array (n,m) of floats): discharge in each of the m inflows as a function of time [m3.s-1]
         TPval (numpy array (n,m) of floats): TP concentrations in each of the m inflows as a function of time [mg.m-3]
         tbudget (numpy array (p,) of floats): time at which Pin must be computed, as timestamp values (number of seconds since 01.01.1970)
-    
+        calculation (string): "interp" or "average"
         
     Outputs:
         Pin_budget (numpy array (p,) of floats): total incoming (outgoing) P load as a function of time [tons-P.yr-1]
+        Qin_budget (numpy array (q,) of floats): total incoming (outgoing) discharge as a function of time [m-3.s-1]
+        tbudget_new (numpy array (p,) of floats): time at which Pin is computed (differs from tbudget if average calculation is used), as timestamp values (number of seconds since 01.01.1970)
     """
-
-    Pin=np.nansum(Qval*TPval,axis=1)*86400*365*1e-9
-    Pin_budget=np.interp(tbudget,tnum,Pin) # Linear interpolation
     
-    return Pin_budget
+    Pin=np.nansum(Qval*TPval,axis=1)*86400*365*1e-9
+    
+    if calculation=="interp":
+        Pin_budget=np.interp(tbudget,tnum,Pin,left=np.nan,right=np.nan) # Linear interpolation
+        Qin_budget=np.interp(tbudget,tnum,np.nansum(Qval,axis=1)) # Linear interpolation
+        tbudget_new=tbudget
+    elif calculation=="average":
+        tbudget_new,Pin_budget,_=average_between(tbudget,tnum,Pin) # Average between dates
+        _,Qin_budget,_=average_between(tbudget,tnum,np.nansum(Qval,axis=1))
+        Pin_budget=np.concatenate((Pin_budget,np.array([np.nan])),axis=0) # Add a nan value at the end
+        tbudget_new=np.concatenate((tbudget_new,np.array([np.nan])),axis=0) # Add a nan value at the end      
+        Qin_budget=np.concatenate((Qin_budget,np.array([np.nan])),axis=0) # Add a nan value at the end
+        
+    return Pin_budget, Qin_budget, tbudget_new
+
+
 
 #%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 def average_between(xnew,xdata,ydata):
     """
     Computes the average between each x point
     
+    Inputs:
+        xnew (numpy array (m,) of floats): new x values defining the intervals for which the y data must be averaged
+        xdata (numpy array (n,) of floats): initial x values corresponding to the y data
+        ydata (numpy array (n,) of floats): y values to average between each xnew value
+        
+    Outputs:
+        xmean (numpy array (m,) of floats): mid-interval values from xnew array
+        ymean (numpy array (m,) of floats): averaged y values over each interval from xnew
+        ystd (numpy array (m,) of floats): standard deviation for each of the averages ymean
+    
     """
     xmean=xnew[:-1]+0.5*(xnew[1:]-xnew[:-1])
     ymean=np.full(len(xnew)-1,np.nan)
+    ystd=np.full(len(xnew)-1,np.nan)
     for k in range(len(xmean)):
         bool_avg=np.logical_and(xdata>=xnew[k],xdata<xnew[k+1])
-        if np.sum(bool_avg)>0:
+        if np.sum(bool_avg)>0: # At least one value
             ymean[k]=np.nanmean(ydata[bool_avg])
+            ystd[k]=np.nanstd(ydata[bool_avg])
+        else:
+            print("No value for averaging between {} and {}".format(xnew[k],xnew[k+1]))
     
-    return xmean,ymean
+    return xmean,ymean, ystd
     
     
 
@@ -66,32 +94,62 @@ def compute_river_load_from_curve(Qcurve,TPcurve,tnum,Qval,tbudget,method="power
         Qval (numpy array (p,m) of floats): discharge in each of the m inflows as a function of time for which TPin must be estimated [m3.s-1]
         tbudget (numpy array (q,) of floats): time at which Pin must be computed, as timestamp values (number of seconds since 01.01.1970)
         method (string): regression method, the only option is currently "power": TP=a*Q^b (other options can be added)
-       calculation (string): "interp" or "average"
+        calculation (string): "interp" or "average"
              
     Outputs:
-        Pin_budget (numpy array (q or q-1,) of floats): total incoming (outgoing) P load as a function of time [tons-P.yr-1]
-        Qin_budget
-        tbudget_new (numpy array (q or q-1,) of floats): time at which Pin is computed (differs from tbudget if average calculation is used), as timestamp values (number of seconds since 01.01.1970)
+        Pin_budget (numpy array (q,) of floats): total incoming (outgoing) P load as a function of time [tons-P.yr-1]
+        Qin_budget (numpy array (q,) of floats): total incoming (outgoing) discharge as a function of time [m-3.s-1]
+        tbudget_new (numpy array (q,) of floats): time at which Pin is computed (differs from tbudget if average calculation is used), as timestamp values (number of seconds since 01.01.1970)
+        param (numpy array (x,m) of floats): x parameters of the regression curve for each inflow (e.g., a and b for "power")
+        R2 (numpy array (m,) of floats): R2 value of the regression curve for each inflow 
     """
     # Compute curve
     TPval=np.full(Qval.shape,np.nan)
+    R2=np.full((Qval.shape[1],),np.nan)
     if method=="power":
+        param=np.full((2,Qval.shape[1]),np.nan)
         for kin in range(Qcurve.shape[1]):
             bool_keep=np.logical_and(Qcurve[:,kin]>0,TPcurve[:,kin]>0)
             regres= linregress(np.log(Qcurve[bool_keep,kin]),np.log(TPcurve[bool_keep,kin]))
-            param=[regres.slope,regres.intercept]
-
-            TPval[Qval[:,kin]>0,kin]=np.exp(np.polyval(param,np.log(Qval[Qval[:,kin]>0,kin])))
+            param_log=np.array([regres.slope,regres.intercept])
+            param[:,kin]=[np.exp(param_log[1]),param_log[0]]
+            R2[kin]=regres.rvalue**2
+            TPval[Qval[:,kin]>0,kin]=np.exp(np.polyval(param_log,np.log(Qval[Qval[:,kin]>0,kin])))
     Pin=np.nansum(Qval*TPval,axis=1)*86400*365*1e-9 
     if calculation=="interp":
         Pin_budget=np.interp(tbudget,tnum,Pin) # Linear interpolation
         Qin_budget=np.interp(tbudget,tnum,np.nansum(Qval,axis=1)) # Linear interpolation
         tbudget_new=tbudget
     elif calculation=="average":
-        tbudget_new,Pin_budget=average_between(tbudget,tnum,Pin) # Average between dates
-        _,Qin_budget=average_between(tbudget,tnum,np.nansum(Qval,axis=1)) 
+        tbudget_new,Pin_budget,_=average_between(tbudget,tnum,Pin) # Average between dates
+        _,Qin_budget,_=average_between(tbudget,tnum,np.nansum(Qval,axis=1))
+        Pin_budget=np.concatenate((Pin_budget,np.array([np.nan])),axis=0) # Add a nan value at the end
+        Qin_budget=np.concatenate((Qin_budget,np.array([np.nan])),axis=0) # Add a nan value at the end
+        tbudget_new=np.concatenate((tbudget_new,np.array([np.nan])),axis=0) # Add a nan value at the end
     
-    return Pin_budget, Qin_budget, tbudget_new
+    return Pin_budget, Qin_budget, tbudget_new, param, R2
+
+#%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+def discharge_TP(tnum,Qin):
+    """Function discharge_TP
+
+    Power function TPin=a*Qin^b providing the TP concentration in the inflow as a function of the inflow discharge (could be modified to use other functions).
+
+    Inputs:
+        tnum (numpy array (n,) of floats): time as timestamp values for which Qin is measured (number of seconds since 01.01.1970)
+        Qin (numpy array (n,) of floats): inflow discharge [m3.s-1]
+             
+    Outputs:
+        TPin (numpy array (n,) of floats): TP concentration in the inflow [mg.m-3] 
+    """
+    
+    # Function provided for Baldeggersee by Müller et al. (2012)
+    TPin=np.full(Qin.shape,np.nan)
+    period1_logical=tnum<datetime(1996,1,1).replace(tzinfo=timezone.utc).timestamp()
+    TPin[period1_logical]=100.6*(Qin[period1_logical]*86400*365/1e6)**0.037
+    TPin[~period1_logical]=18.7*(Qin[~period1_logical]*86400*365/1e6)**0.41
+    
+    return TPin
 
 #%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 def compute_TP_2boxes(depthval,TPval,hepi):
@@ -331,9 +389,9 @@ def compute_remobilization_Carter(TP_epi,A_sed,a=-0.54,b=0.827):
     Outputs:
         P_remob (numpy array (n,) of floats): phosphorus remobilization mass flux [tons-P/yr]
     """
-    P_remob=np.full(TP_epi.shape,np.nan)
-    P_remob[TP_epi<=0]=np.nan
-    P_remob[TP_epi>0]=np.exp(a+b*np.log(TP_epi[TP_epi>0]))*A_sed[TP_epi>0]*365*1e-9 # [tons-P/yr]
+    P_remob=np.full(TP_epi.shape,0) # Set P_remob to zero if TP_epi==0
+    ind_calc=TP_epi>0
+    P_remob[ind_calc]=np.exp(a+b*np.log(TP_epi[ind_calc]))*A_sed[ind_calc]*365*1e-9 # [tons-P/yr]
     # Note: P_remob=0 when A_sed==0 (fully mixed, no hypoxia)
       
     return P_remob
@@ -405,7 +463,9 @@ def compute_net_sed_Vollenweider(TP,sigma_max,V,P_NS_max=np.nan,TPcrit=np.nan):
         TPcrit (float): critical TP concentration above which sigma is not constant [mg-P/m3]
         
     Outputs:
-        P_NS (numpy array (n,) of floats): net phosphorus sedimentation flux [tons-P/m3]
+        P_NS (numpy array (n,) of floats): net phosphorus sedimentation flux [tons-P/yr]
+        sigma_max (float): maximal net sedimentation rate reached for low TP concentrations (slope of the linear relationship P_NS=f(TP)) [yr-1]
+        TPcrit (float): critical TP concentration above which sigma is not constant [mg-P/m3]
     """   
     
     P_NS=np.full(TP.shape,np.nan)
@@ -414,15 +474,15 @@ def compute_net_sed_Vollenweider(TP,sigma_max,V,P_NS_max=np.nan,TPcrit=np.nan):
         P_NS[TP<TPcrit]=sigma_max*TP[TP<TPcrit]*V*1e-9 
         P_NS[TP>=TPcrit]=P_NS_max
     elif np.isnan(P_NS_max) and not np.isnan(sigma_max):
-        P_NS=sigma_max*TP*V*1e-9 
+        P_NS=sigma_max*TP*V*1e-9 # No saturation of P_NS
     elif not np.isnan(sigma_max):
-        TPcrit2=P_NS_max*1e9/(sigma_max*V) # TP concentration where the two models meet [mg/m3] 
-        P_NS[TP<TPcrit2]=sigma_max*TP[TP<TPcrit2]*V*1e-9 
-        P_NS[TP>=TPcrit2]=P_NS_max
+        TPcrit=P_NS_max*1e9/(sigma_max*V) # TP concentration where the two models meet [mg/m3] 
+        P_NS[TP<TPcrit]=sigma_max*TP[TP<TPcrit]*V*1e-9 
+        P_NS[TP>=TPcrit]=P_NS_max
     else:
         raise Exception("Not enough parameters were provided")
     
-    return P_NS
+    return P_NS, sigma_max, TPcrit
 
 #%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 def compute_stratified_periods(tnum,hepi,zmax):
@@ -519,7 +579,8 @@ def compute_anoxia_red(tnum_budget,hepi_model,z_mean,Fred=0.36,C0=11,delta=0.82e
     return bool_anoxic,ndays_to_anox,tstart_anox
 
 #%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-def predict_TP_model(tnum_rivers,bool_anoxic,Pin,Qout,hepi,TPepi0,TPhypo0,TPsed,z_hypso,A_hypso,Thypo=np.array([]),Tepi=np.array([]),sigma_max=np.nan,P_NS_max=np.nan,TPcrit=np.nan,k_sigma=10,Kz=1e-7,zout=0,method_sed="Vollenweider",method_remob="average"):
+def predict_TP_model(tnum_rivers,bool_anoxic,Pin,Qout,hepi,TPepi0,TPhypo0,TPsed,z_hypso,A_hypso,Thypo=np.array([]),Tepi=np.array([]),sigma_max=np.nan,
+                     P_NS_max=np.nan,TPcrit=np.nan,k_sigma=10,Kz=1e-7,zout=0,method_sed="Vollenweider",method_remob="average",show_output=False):
     """Function predict_TP_model
 
     Predicts TPepi and TPhypo based on a two-box model. 
@@ -544,7 +605,8 @@ def predict_TP_model(tnum_rivers,bool_anoxic,Pin,Qout,hepi,TPepi0,TPhypo0,TPsed,
         Kz (float): vertical turbulent diffusivity [m2/s] 
         zout (float): depth of the outflow [m]
         method_sed (string): method to compute sedimentation, options are "Hanson" (gross sedimentation) or "Vollenweider" (net sedimentation)
-        method_remob (string): method to compute remobilizaztion, options are "Nurnberg", "Hanson", "Carter" or "average"
+        method_remob (string): method to compute remobilization, options are "Nurnberg", "Hanson", "Carter" or "average"
+        show_output (boolean): =True to display sedimentation parameters values at each iteration
     
     Outputs:
         tnum_predict (numpy array (n+1,) of floats): timestamps when TP is computed, including initial values (number of seconds since 01.01.1970)
@@ -553,7 +615,7 @@ def predict_TP_model(tnum_rivers,bool_anoxic,Pin,Qout,hepi,TPepi0,TPhypo0,TPsed,
         TPhypo (numpy array (n+1,) of floats): average hypolimnetic TP [tons-P.m-3.yr-1]
         TPhypo_range (numpy array (2,n+1) of floats): minimum and maximum hypolimnetic TP [tons-P.m-3.yr-1]
         P_fluxes (dictionary of numpy arrays (n,) of floats): phosphorus fluxes Pin, Pout_epi, Pout_hypo, Premob, Pnet_sed, Pz [tons-P.yr-1]
-        param
+        param (dictionary of (n,) numpy arrays): parameters related to the Vollenweider sedimentation flux (e.g., sigma_max, TPcrit, P_NS_max...)
     """  
     
     # Lake parameters
@@ -581,6 +643,10 @@ def predict_TP_model(tnum_rivers,bool_anoxic,Pin,Qout,hepi,TPepi0,TPhypo0,TPsed,
     TPhypo[0]=TPhypo0
     TPepi_range[:,0]=np.array([TPepi0,TPepi0])
     TPhypo_range[:,0]=np.array([TPhypo0,TPhypo0])
+    
+    param={"sigma_max":np.full(len(tnum_rivers),np.nan),
+           "TPcrit":np.full(len(tnum_rivers),np.nan),
+           "P_NS_max":np.full(len(tnum_rivers),np.nan)}
     
     # Computation (temporal loop)
     for kt in range(len(tnum_rivers)-1):
@@ -612,6 +678,7 @@ def predict_TP_model(tnum_rivers,bool_anoxic,Pin,Qout,hepi,TPepi0,TPhypo0,TPsed,
             Premob_Nurnberg=compute_remobilization_Nurnberg(TPsed,Atherm) # [tons-P yr-1]
             Premob_Carter=compute_remobilization_Carter(TPepi[kt],Atherm) # [tons-P yr-1]
         
+            
             if method_remob=="Nurnberg":
                 Premob[kt]=Premob_Nurnberg
             elif method_remob=="Hanson":
@@ -631,7 +698,13 @@ def predict_TP_model(tnum_rivers,bool_anoxic,Pin,Qout,hepi,TPepi0,TPhypo0,TPsed,
             if np.isnan(sigma_max): # Value not specified
                 if np.isnan(TPcrit) or np.isnan(P_NS_max):
                     sigma_max=k_sigma/z_mean # [yr-1]
-            Pnet_sed[kt]=compute_net_sed_Vollenweider(TP_lake,sigma_max,V_lake,P_NS_max,TPcrit)
+            Pnet_sed[kt],sigma_max_new,TPcrit_new=compute_net_sed_Vollenweider(TP_lake,sigma_max,V_lake,P_NS_max,TPcrit)
+            if show_output:
+                print("{}: TP_lake={:.2f} mg/m3, P_NS={:.2f} tons/yr, sigma_max={:.2f} yr-1, TPcrit={:.2f} mg/m3".format(datetime.fromtimestamp(tnum_predict[kt],UTC),
+                                                                                                     TP_lake,Pnet_sed[kt],sigma_max_new,TPcrit_new))
+            param["sigma_max"][kt]=sigma_max_new
+            param["TPcrit"][kt]=TPcrit_new
+            param["P_NS_max"][kt]=P_NS_max
         elif method_sed=="Hanson" and list(Tepi):
             Pgross=compute_gross_sed_Hanson(Pin[kt],TPepi[kt],Tepi[kt],Vepi,C_pp=0.5) # [tons-P/yr]
             if Pgross>Premob[kt]:
@@ -640,6 +713,7 @@ def predict_TP_model(tnum_rivers,bool_anoxic,Pin,Qout,hepi,TPepi0,TPhypo0,TPsed,
                 Pnet_sed[kt]=0
         else:
             raise Exception("Wrong sedimentation method")
+        
         
         # 5. Phosphorus transfer due to thermocline vertical motion
         Vepi_new=np.nansum(V_hypso[z_hypso<=hepi[kt+1]])
@@ -674,5 +748,90 @@ def predict_TP_model(tnum_rivers,bool_anoxic,Pin,Qout,hepi,TPepi0,TPhypo0,TPsed,
         TPhypo_range[TPhypo_range[:,kt+1]<0,kt+1]=0
             
     P_fluxes={"Pin":Pin,"Pout_epi":Pout_epi,"Pout_hypo":Pout_hypo,"Premob":Premob,"Pnet_sed":Pnet_sed,"Pz":Pz}
-    param={"sigma_max":sigma_max}
+    
     return tnum_predict,TPepi,TPepi_range,TPhypo,TPhypo_range, P_fluxes, param
+
+#%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+def sensitivity_model(param_name,param_changes,tnum_budget,bool_anoxic,Pin,Qout,hepi,TPepi0,TPhypo0,TPsed,z_hypso,A_hypso,Thypo=np.array([]),Tepi=np.array([]),sigma_max=np.nan,
+                     P_NS_max=np.nan,TPcrit=np.nan,k_sigma=10,Kz=1e-7,zout=0,method_sed="Vollenweider",method_remob="average",cst_input=True,show_output=False):
+     
+    """Function sensitivity_model
+
+    Runs a sensitivity analysis of a specified parameter
+
+    Inputs:
+        param_name (string): name of the parameter for which the sensitivity analysis must be performed (options are "Pin","Qout","sigma_max","P_NS_max","TPcrit" and "TPsed")
+        param_changes (numpy array (c,) of floats): multiplication factor of the parameter
+        tnum_budget (numpy array (n,) of floats): timestamps with river data Pin and Qout (number of seconds since 01.01.1970)
+        bool_anoxic (numpy array (n,) of booleans): =True during anoxic period, =False otherwise
+        Pin (numpy array (n,) of floats): input P load from rivers computed as Pin=Qin*TPin [tons-P/yr]
+        Qout (numpy array (n,) of floats): outflow set equal to Qin by assuming that there is no change of water level [m3/s]
+        hepi (numpy array (n,) of floats): real thermocline depth [m]
+        TPhypo0 (float): initial TP concentration in the hypolimnion [mg-P/m3]
+        TPepi0 (float): initial TP concentration in the epilimnion [mg-P/m3]
+        TPsed (float): phosphorus concentration at the sediment surface [mg-P/g-sed] 
+        z_hypso (numpy array (m,) of floats): depth values where the lake area is provided [m] 
+        A_hypso (numpy array (m,) of floats): lake area at the depth values z_hypso [m2]
+        Thypo (numpy array (n,) of floats): hypolimnion temperature [°C], if nan the remobilization rate is not estimated with the Hanson method
+        Tepi (numpy array (n,) of floats): epilimnion temperature [°C], if nan the gross sedimentation rate cannot be estimated with the Hanson method
+        sigma_max (float): maximal net sedimentation rate reached for low TP concentrations (slope of the linear relationship P_NS=f(TP)) [yr-1]. If nan, estimated from z_mean.
+        P_NS_max (float): maximal net sedimentation flux, reached for high TP concentrations [tons-P/yr]. If nan, only linear relationship is used.
+        TPcrit (float): critical TP concentration above which sigma is not constant [mg-P/m3]
+        k_sigma (float): empirical coefficient to compute sigma_max as sigma_max=k_sigma/z_mean [m.yr-1], common range is 8-16 (Müller et al., 2014) 
+        Kz (float): vertical turbulent diffusivity [m2/s] 
+        zout (float): depth of the outflow [m]
+        method_sed (string): method to compute sedimentation, options are "Hanson" (gross sedimentation) or "Vollenweider" (net sedimentation)
+        method_remob (string): method to compute remobilization, options are "Nurnberg", "Hanson", "Carter" or "average"
+        cst_input (boolean): =True to set Pin and Qout constant during the simulation period
+        show_output (boolean): =True to display sedimentation parameters values at each iteration
+    
+    Outputs:
+        param_test (numpy array (c,) of floats): values of the tested parameter
+        TPepi_sens (numpy array (c,n) of floats): modelled TP concentration in the epilimnion as a function of time for all the values of the tested parameters [mg-P/m3]
+        TPhypo_sens (numpy array (c,n) of floats): modelled TP concentration in the hypolimnion as a function of time for all the values of the tested parameters [mg-P/m3]
+        TPlake_sens (numpy array (c,n) of floats): modelled lake-averaged TP concentration as a function of time for all the values of the tested parameters [mg-P/m3]
+    """  
+    
+    param_dict={"Pin":Pin,"Qout":Qout,"sigma_max":sigma_max,"P_NS_max":P_NS_max,"TPcrit":TPcrit,"TPsed":TPsed}
+    param_list=list(param_dict.keys())
+    param_test=np.nanmean(param_dict[param_name])*param_changes
+    param_val=dict()
+
+    TPepi_sens=np.full((len(param_test),len(tnum_budget)),np.nan)
+    TPhypo_sens=np.full((len(param_test),len(tnum_budget)),np.nan)
+    TPlake_sens=np.full((len(param_test),len(tnum_budget)),np.nan)
+    
+    for k in range(len(param_test)):
+        print("Iteration {}/{}".format(k+1,len(param_test)))
+        
+        # Parameters values:
+        for kparam in range(len(param_list)):
+            if param_name==param_list[kparam]: # This is the parameter to modify
+                param_val[param_list[kparam]]=param_test[k]
+            else:
+                if isinstance(param_dict[param_list[kparam]], np.ndarray):
+                    param_val[param_list[kparam]]=np.nanmean(param_dict[param_list[kparam]]) 
+                else:
+                    param_val[param_list[kparam]]=param_dict[param_list[kparam]]
+        
+        if cst_input:
+            Pin_series=np.full(Pin.shape,param_val["Pin"])
+            Qout_series=np.full(Qout.shape,param_val["Qout"])
+        else:
+            if param_name=="Pin":
+                Pin_series=Pin*param_changes[k]
+                Qout_series=Qout
+            elif param_name=="Qout":
+                Pin_series=Pin
+                Qout_series=Qout*param_changes[k]
+            else:
+                Pin_series=Pin
+                Qout_series=Qout
+            
+        print("Pin={}, sigma_max={}, PNSmax={}".format(param_val["Pin"],param_val["sigma_max"],param_val["P_NS_max"]))
+        tnum_sens,TPepi_sens[k,:],_,TPhypo_sens[k,:],_,_,_=predict_TP_model(tnum_budget,bool_anoxic,Pin_series,Qout_series,hepi,TPepi0,TPhypo0,param_val["TPsed"],
+                                                                                           z_hypso,A_hypso,Thypo,Tepi,sigma_max=param_val["sigma_max"],P_NS_max=param_val["P_NS_max"],TPcrit=param_val["TPcrit"],
+                                                                                           k_sigma=k_sigma,Kz=Kz,zout=zout,method_sed=method_sed,method_remob=method_remob,show_output=show_output)
+        TPlake_sens[k,:]=np.nanmean(np.array([TPepi_sens[k,:],TPhypo_sens[k,:]]),axis=0)
+    
+    return param_test,TPepi_sens, TPhypo_sens, TPlake_sens
