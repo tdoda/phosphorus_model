@@ -151,6 +151,8 @@ def discharge_TP(tnum,Qin):
     
     return TPin
 
+
+
 #%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 def compute_TP_2boxes(depthval,TPval,hepi):
     """Function compute_TP_2boxes
@@ -376,7 +378,7 @@ def compute_remobilization_Nurnberg(TP_sed,A_sed,a=0.8,b=0.76):
     return P_remob
 
 #%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-def compute_remobilization_Carter(TP_epi,A_sed,a=-0.54,b=0.827):
+def compute_remobilization_Carter(TP_epi,A_sed,a=-0.54,b=0.827,avg=False):
     """Function compute_remobilization_Carter
 
     Computes the phosphorus remobilization flux based on Carter & Dzialowski (2012). 
@@ -385,15 +387,64 @@ def compute_remobilization_Carter(TP_epi,A_sed,a=-0.54,b=0.827):
         TP_epi (numpy array (n,) of floats): TP concentration in the epilimnion [mg-P/m3]
         A_sed (numpy array (n,) of floats): sediment surface area below the thermocline [m2]
         a, b (float): empirical coefficients from Carter & Dzialowski (2012)
+        avg (boolean): if =True, use the average TP_epi during stratifcation period
         
     Outputs:
         P_remob (numpy array (n,) of floats): phosphorus remobilization mass flux [tons-P/yr]
     """
     P_remob=np.full(TP_epi.shape,0) # Set P_remob to zero if TP_epi==0
-    ind_calc=TP_epi>0
-    P_remob[ind_calc]=np.exp(a+b*np.log(TP_epi[ind_calc]))*A_sed[ind_calc]*365*1e-9 # [tons-P/yr]
-    # Note: P_remob=0 when A_sed==0 (fully mixed, no hypoxia)
-      
+    if not isinstance(TP_epi,np.ndarray):
+        if TP_epi>0:
+            P_remob=np.exp(a+b*np.log(TP_epi))*A_sed*365*1e-9 # [tons-P/yr]
+    else:        
+        ind_stratif=np.where(TP_epi>0)[0]
+        ind_stratif_start=np.concatenate((np.array([ind_stratif[0]]),ind_stratif[np.where(np.diff(ind_stratif)>1)[0]+1]))
+        ind_stratif_end=np.concatenate((ind_stratif[np.where(np.diff(ind_stratif)>1)[0]-1],np.array([ind_stratif[-1]])))
+       
+        for kstrat in range(len(ind_stratif_start)): # Each stratified period: compute P_remob 
+            if avg:
+                TPavg=np.nanmean(TP_epi[ind_stratif_start[kstrat]:ind_stratif_end[kstrat]+1])
+                P_remob[ind_stratif_start[kstrat]:ind_stratif_end[kstrat]+1]=np.exp(a+b*np.log(TPavg))*A_sed[ind_stratif_start[kstrat]:ind_stratif_end[kstrat]+1]*365*1e-9 # [tons-P/yr]
+            else:
+                P_remob[ind_stratif_start[kstrat]:ind_stratif_end[kstrat]+1]=np.exp(a+b*np.log(TP_epi[ind_stratif_start[kstrat]:ind_stratif_end[kstrat]+1]))*A_sed[ind_stratif_start[kstrat]:ind_stratif_end[kstrat]+1]*365*1e-9 # [tons-P/yr]
+            # Note: P_remob=0 when A_sed==0 (fully mixed, no hypoxia)
+          
+    return P_remob
+
+#%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+def compute_remobilization_hypo(tnum_budget,tnum_TP,TPhypo,Vhypo,hepi_budget,hmax):
+    """Function compute_remobilization_hypo
+
+    Computes the phosphorus remobilization flux based on changes in hypolimnetic phosphorus content.
+
+    Inputs:
+        tnum_budget (numpy array (n,) of floats): timestamps when Premob must be calculated (number of seconds since 01.01.1970)
+        tnum_TP (numpy array (m,) of floats): timestamps when TP is measured (number of seconds since 01.01.1970)
+        TPhypo (numpy array (m,) of floats): TP concentration in the hypolimnion [mg-P/m3]
+        Vhypo (numpy array (m,) of floats): volume of the hypolimnion [m3]
+        hepi_budget (numpy array (n,) of floats): epilimnion thickness [m]
+        hmax (float): maximum lake depth
+         
+    Outputs:
+        P_remob (numpy array (n,) of floats): phosphorus remobilization mass flux [tons-P/yr]
+    """
+    P_remob=np.full(len(tnum_budget),0)
+    ind_stratif=np.where(hepi_budget<hmax)[0]
+    ind_stratif_start=np.concatenate((np.array([ind_stratif[0]]),ind_stratif[np.where(np.diff(ind_stratif)>1)[0]+1]))
+    ind_stratif_end=np.concatenate((ind_stratif[np.where(np.diff(ind_stratif)>1)[0]-1],np.array([ind_stratif[-1]])))
+    
+    for kstrat in range(len(ind_stratif_start)): # Each stratified period: compute P_remob
+        ind_TP=np.where(np.logical_and(tnum_TP>=tnum_budget[ind_stratif_start[kstrat]],tnum_TP<=tnum_budget[ind_stratif_end[kstrat]]))[0]
+        if ind_TP.size>0:
+            indmin=np.argmin(TPhypo[ind_TP])
+            indmax=np.argmax(TPhypo[ind_TP])
+            Vhypo_mean=np.nanmean(Vhypo[ind_TP[Vhypo[ind_TP]>0]])
+            if indmin<indmax:
+                #param=np.polyfit(tnum_TP[ind_TP[indmin:indmax+1]]/(86400*365),TPhypo[ind_TP[indmin:indmax+1]]*Vhypo[ind_TP[indmin:indmax+1]]*1e-9,1)
+                #P_remob[ind_stratif_start[kstrat]:ind_stratif_end[kstrat]+1]=param[0]
+                P_remob[ind_stratif_start[kstrat]:ind_stratif_end[kstrat]+1]=Vhypo_mean*(TPhypo[ind_TP[indmax]]-TPhypo[ind_TP[indmin]])/(tnum_TP[ind_TP[indmax]]-tnum_TP[ind_TP[indmin]])*86400*365*1e-9
+    P_remob[P_remob<0]=0
+    
     return P_remob
 
 #%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -686,8 +737,10 @@ def predict_TP_model(tnum_rivers,bool_anoxic,Pin,Qout,hepi,TPepi0,TPhypo0,TPsed,
             elif method_remob=="Carter":
                 Premob[kt]=Premob_Carter
             else:
-                Premob[kt]=np.nanmean(np.array([Premob_Hanson,Premob_Nurnberg,Premob_Carter]))
-            Premob_range[:,kt]=np.array([np.nanmin([Premob_Hanson,Premob_Nurnberg,Premob_Carter]),np.nanmax([Premob_Hanson,Premob_Nurnberg,Premob_Carter])])
+                #Premob[kt]=np.nanmean(np.array([Premob_Hanson,Premob_Nurnberg,Premob_Carter]))
+                Premob[kt]=np.nanmean(np.array([Premob_Nurnberg,Premob_Carter]))
+            #Premob_range[:,kt]=np.array([np.nanmin([Premob_Hanson,Premob_Nurnberg,Premob_Carter]),np.nanmax([Premob_Hanson,Premob_Nurnberg,Premob_Carter])])
+            Premob_range[:,kt]=np.array([np.nanmin([Premob_Nurnberg,Premob_Carter]),np.nanmax([Premob_Nurnberg,Premob_Carter])])
         else:
             Premob[kt]=0
             Premob_range[:,kt]=np.array([0,0])
