@@ -661,10 +661,10 @@ def predict_TP_model(tnum_rivers,bool_anoxic,Pin,Qout,hepi,TPepi0,TPhypo0,TPsed,
     
     Outputs:
         tnum_predict (numpy array (n+1,) of floats): timestamps when TP is computed, including initial values (number of seconds since 01.01.1970)
-        TPepi (numpy array (n+1,) of floats): average epilimnetic TP [tons-P.m-3.yr-1]
-        TPepi_range (numpy array (2,n+1) of floats): minimum and maximum epilimnetic TP [tons-P.m-3.yr-1]
-        TPhypo (numpy array (n+1,) of floats): average hypolimnetic TP [tons-P.m-3.yr-1]
-        TPhypo_range (numpy array (2,n+1) of floats): minimum and maximum hypolimnetic TP [tons-P.m-3.yr-1]
+        TPepi (numpy array (n+1,) of floats): average epilimnetic TP [mg-P.m-3]
+        TPepi_range (numpy array (2,n+1) of floats): minimum and maximum epilimnetic TP based on min/max Premob at each time step using different methods [mg-P.m-3]
+        TPhypo (numpy array (n+1,) of floats): average hypolimnetic TP [mg-P.m-3]
+        TPhypo_range (numpy array (2,n+1) of floats): minimum and maximum hypolimnetic TP based on min/max Premob at each time step using different methods [mg-P.m-3]
         P_fluxes (dictionary of numpy arrays (n,) of floats): phosphorus fluxes Pin, Pout_epi, Pout_hypo, Premob, Pnet_sed, Pz [tons-P.yr-1]
         param (dictionary of (n,) numpy arrays): parameters related to the Vollenweider sedimentation flux (e.g., sigma_max, TPcrit, P_NS_max...)
     """  
@@ -682,7 +682,8 @@ def predict_TP_model(tnum_rivers,bool_anoxic,Pin,Qout,hepi,TPepi0,TPhypo0,TPsed,
     Pz=np.full(len(tnum_rivers),np.nan)
     Pnet_sed=np.full(len(tnum_rivers),np.nan)
     Premob=np.full(len(tnum_rivers),np.nan)
-    Premob_range=np.full((2,len(tnum_rivers)),np.nan)
+    Premob_methods=np.zeros((2,len(tnum_rivers))) # Premob from 2 methods: Carter & Nürnberg
+    Premob_range=np.zeros((2,len(tnum_rivers)))
     
     #tnum_predict=np.concatenate((np.array([tnum_rivers[0]-0.5*(tnum_rivers[1]-tnum_rivers[0])]),0.5*(tnum_rivers[:-1]+tnum_rivers[1:]),np.array([tnum_rivers[-1]+0.5*(tnum_rivers[-1]-tnum_rivers[-2])])))
     tnum_predict=np.copy(tnum_rivers)
@@ -728,6 +729,7 @@ def predict_TP_model(tnum_rivers,bool_anoxic,Pin,Qout,hepi,TPepi0,TPhypo0,TPsed,
                 Premob_Hanson=np.nan
             Premob_Nurnberg=compute_remobilization_Nurnberg(TPsed,Atherm) # [tons-P yr-1]
             Premob_Carter=compute_remobilization_Carter(TPepi[kt],Atherm) # [tons-P yr-1]
+            Premob_methods[:,kt]=np.array([Premob_Nurnberg,Premob_Carter])
         
             
             if method_remob=="Nurnberg":
@@ -740,10 +742,10 @@ def predict_TP_model(tnum_rivers,bool_anoxic,Pin,Qout,hepi,TPepi0,TPhypo0,TPsed,
                 #Premob[kt]=np.nanmean(np.array([Premob_Hanson,Premob_Nurnberg,Premob_Carter]))
                 Premob[kt]=np.nanmean(np.array([Premob_Nurnberg,Premob_Carter]))
             #Premob_range[:,kt]=np.array([np.nanmin([Premob_Hanson,Premob_Nurnberg,Premob_Carter]),np.nanmax([Premob_Hanson,Premob_Nurnberg,Premob_Carter])])
-            Premob_range[:,kt]=np.array([np.nanmin([Premob_Nurnberg,Premob_Carter]),np.nanmax([Premob_Nurnberg,Premob_Carter])])
+            Premob_range[:,kt]=np.array([np.nanmin(Premob_methods[:,kt]),np.nanmax(Premob_methods[:,kt])])
         else:
             Premob[kt]=0
-            Premob_range[:,kt]=np.array([0,0])
+            
             
         # 4. Net sedimentation
         if method_sed=="Vollenweider":
@@ -777,8 +779,11 @@ def predict_TP_model(tnum_rivers,bool_anoxic,Pin,Qout,hepi,TPepi0,TPhypo0,TPsed,
             dmass=dV_epi*TPepi[kt] # < 0, [mg]
         
         TPepi[kt+1]=(TPepi[kt]*Vepi+dmass+1e9/(86400*365)*delta_t*(Pin[kt]-Pout_epi[kt]-Premob[kt]-Pnet_sed[kt]+Pz[kt]))/Vepi_new # [mg.m-3]
-        TPepi_range[:,kt+1]=np.array([(TPepi_range[0,kt]*Vepi+dmass+1e9/(86400*365)*delta_t*(Pin[kt]-Pout_epi[kt]-Premob_range[1,kt]-Pnet_sed[kt]+Pz[kt]))/Vepi_new,\
-                              (TPepi_range[1,kt]*Vepi+dmass+1e9/(86400*365)*delta_t*(Pin[kt]-Pout_epi[kt]-Premob_range[0,kt]-Pnet_sed[kt]+Pz[kt]))/Vepi_new]) # [mg.m-3]
+        TPepi_range[:,kt+1]=np.array([(TPepi[kt]*Vepi+dmass+1e9/(86400*365)*delta_t*(Pin[kt]-Pout_epi[kt]-Premob_range[1,kt]-Pnet_sed[kt]+Pz[kt]))/Vepi_new,\
+                              (TPepi[kt]*Vepi+dmass+1e9/(86400*365)*delta_t*(Pin[kt]-Pout_epi[kt]-Premob_range[0,kt]-Pnet_sed[kt]+Pz[kt]))/Vepi_new]) # [mg.m-3]
+        
+        
+        
         
         if TPepi[kt+1]<0:
             TPepi[kt+1]=0
@@ -788,10 +793,12 @@ def predict_TP_model(tnum_rivers,bool_anoxic,Pin,Qout,hepi,TPepi0,TPhypo0,TPsed,
             # If stratified but oxic: Premob=0
         
         if hepi[kt+1]<np.max(z_hypso): # Stratified
-            TPhypo[kt+1]=(TPhypo[kt]*(V_lake-Vepi)-dmass+1e9/(86400*365)*delta_t*(Premob[kt]-Pz[kt]-Pout_hypo[kt]))/(V_lake-Vepi_new) # [mg.m-3]
-            TPhypo_range[:,kt+1]=np.array([(TPhypo_range[0,kt]*(V_lake-Vepi)-dmass+1e9/(86400*365)*delta_t*(Premob_range[0,kt]-Pz[kt]-Pout_hypo[kt]))/(V_lake-Vepi_new),\
-                                            (TPhypo_range[1,kt]*(V_lake-Vepi)-dmass+1e9/(86400*365)*delta_t*(Premob_range[1,kt]-Pz[kt]-Pout_hypo[kt]))/(V_lake-Vepi_new)]) # [mg.m-3]
             # If oxic: TPhypo is only driven by Pz because gross sedimentation=net sedimentation
+            TPhypo[kt+1]=(TPhypo[kt]*(V_lake-Vepi)-dmass+1e9/(86400*365)*delta_t*(Premob[kt]-Pz[kt]-Pout_hypo[kt]))/(V_lake-Vepi_new) # [mg.m-3]
+            TPhypo_range[:,kt+1]=np.array([(TPhypo[kt]*(V_lake-Vepi)-dmass+1e9/(86400*365)*delta_t*(Premob_range[0,kt]-Pz[kt]-Pout_hypo[kt]))/(V_lake-Vepi_new),\
+                                            (TPhypo[kt]*(V_lake-Vepi)-dmass+1e9/(86400*365)*delta_t*(Premob_range[1,kt]-Pz[kt]-Pout_hypo[kt]))/(V_lake-Vepi_new)]) # [mg.m-3]
+            
+            
         else: # Fully mixed
             TPhypo[kt+1]=TPepi[kt+1]
             TPhypo_range[:,kt+1]=TPepi_range[:,kt+1]
@@ -800,7 +807,8 @@ def predict_TP_model(tnum_rivers,bool_anoxic,Pin,Qout,hepi,TPepi0,TPhypo0,TPsed,
             TPhypo[kt+1]=0
         TPhypo_range[TPhypo_range[:,kt+1]<0,kt+1]=0
             
-    P_fluxes={"Pin":Pin,"Pout_epi":Pout_epi,"Pout_hypo":Pout_hypo,"Premob":Premob,"Pnet_sed":Pnet_sed,"Pz":Pz}
+    P_fluxes={"Pin":Pin,"Pout_epi":Pout_epi,"Pout_hypo":Pout_hypo,"Premob":Premob,
+              "Pnet_sed":Pnet_sed,"Pz":Pz,"Premob_Nurnberg":Premob_methods[0,:],"Premob_Carter":Premob_methods[1,:]}
     
     return tnum_predict,TPepi,TPepi_range,TPhypo,TPhypo_range, P_fluxes, param
 
